@@ -50,13 +50,22 @@ function restoreCheckout(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Restore checkout.js after every test so subsequent tests start from the
-// expected buggy state.  Without this, the first test to apply the fix would
-// cause every later test (and testQA tests) to see a passing suite instead of
-// the intentional failure.
+// Restore checkout.js before and after every test so each test starts from
+// the expected buggy state, and restore it one final time after the whole
+// suite so the repo is always left with the intentional bug present.
+// Without this, the first test to apply the fix would cause every later test
+// (and testQA tests) to see a passing suite instead of the intentional failure.
 // ---------------------------------------------------------------------------
 
+beforeEach(() => {
+  restoreCheckout();
+});
+
 afterEach(() => {
+  restoreCheckout();
+});
+
+afterAll(() => {
   restoreCheckout();
 });
 
