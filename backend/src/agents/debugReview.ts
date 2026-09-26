@@ -1,20 +1,23 @@
 import { AgentTask, AgentResult } from '../types/contracts';
 
 export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult> {
-  // MOCK IMPLEMENTATION — replace with real logic that parses actual stack
-  // traces, cross-references source files, identifies root causes, and
-  // proposes concrete code-level fixes.
+  // MOCK IMPLEMENTATION — replace with real logic that parses actual stack traces
+  // from the ecommerce-demo test suite, cross-references source files, identifies
+  // root causes, and proposes concrete code-level fixes.
+  // TODO(ecommerce-demo): replace mock FailureReport with real stack-trace analysis.
 
   return {
     agent: 'DEBUG_REVIEW',
     status: 'SUCCESS',
     task,
     failureReport: {
+      // TODO(ecommerce-demo): populate from the live Jest failure output.
       testFailure:
         'calculateDiscount — should apply 20% discount for premium customers',
       stackTrace:
         'AssertionError: expected 80.00 but received 100.00\n' +
         '    at Object.<anonymous> (src/discounts/__tests__/discountService.test.js:42:5)',
+      // TODO(ecommerce-demo): read relevantCode from the actual source file at the offending line.
       relevantCode:
         'function calculateDiscount(price, customer) {\n' +
         '  if (customer.tier === "premium") return price; // bug: discount not applied\n' +
@@ -24,6 +27,7 @@ export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult>
       confidence: 'MEDIUM',
     },
     filesExamined: [
+      // TODO(ecommerce-demo): derive from real cross-reference of failing test imports.
       'src/discounts/discountService.js',
       'src/discounts/__tests__/discountService.test.js',
     ],
@@ -32,5 +36,6 @@ export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult>
     ],
     confidence: 'MEDIUM',
     recommendedNextAction: 'Apply proposed fix and rerun tests.',
+    completedAt: new Date().toISOString(),
   };
 }
