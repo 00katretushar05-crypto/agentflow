@@ -251,7 +251,7 @@ describe('GET /api/task/:id', () => {
     expect(res.body.data.agentResults['TEST_QA']).toBeDefined();
   });
 
-  it('200 — pipeline reaches FAILED for canonical demo task (real agents diagnose but do not auto-fix)', async () => {
+    it('200 — pipeline reaches AWAITING_APPROVAL for canonical demo task after DEBUG_REVIEW applies a real fix', async () => {
     const create = await request(app)
       .post('/api/task')
       .send({ goal: 'Add rate limiting to the /api/auth/login endpoint', maxRetries: 2 })
@@ -262,11 +262,10 @@ describe('GET /api/task/:id', () => {
 
     const res = await request(app).get(`/api/task/${taskId}`);
     expect(res.status).toBe(200);
-    // Real DEBUG_REVIEW only diagnoses and recommends a fix — it never edits
-    // checkout.js — so the intentional bug in ecommerce-demo is never actually
-    // fixed. With maxRetries=2 the pipeline correctly exhausts retries and
-    // lands in terminal FAILED, not AWAITING_APPROVAL.
-    expect(res.body.data.status).toBe('FAILED');
+    // DEBUG_REVIEW now writes its proposed fix to disk (fs.writeFileSync), so a
+    // recovered run with all tests passing correctly reaches AWAITING_APPROVAL,
+    // per the Task 8 verification-gate fix.
+    expect(res.body.data.status).toBe('AWAITING_APPROVAL');
   });
 });
 
