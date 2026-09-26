@@ -38,6 +38,8 @@ import type {
   AgentName,
   FailureReport,
   VerificationResult,
+  AgentStatusEntry,
+  AgentRunStatus,
 } from './types/contracts.js';
 import { transition, isTerminal } from './stateMachine.js';
 import { decomposeTask } from './taskDecomposer.js';
@@ -117,11 +119,18 @@ export function createTask(goal: string, maxRetries = 2): SupervisorTaskState {
     timestamp: now,
   };
 
+  const initialAgentStatus: AgentStatusEntry[] = [
+    { agent: 'CODE_INTELLIGENCE', status: 'PENDING' },
+    { agent: 'TEST_QA',           status: 'PENDING' },
+    { agent: 'DEBUG_REVIEW',      status: 'SKIPPED' }, // only activated on failure
+  ];
+
   const state: SupervisorTaskState = {
     taskId,
     goal,
     status: 'RECEIVED',
     history: [initialTransition],
+    agentStatus: initialAgentStatus,
     agentResults: {},
     retryCount: 0,
     maxRetries,
@@ -361,6 +370,9 @@ async function runRecoveryLoop(state: SupervisorTaskState): Promise<void> {
       'Dispatching DEBUG_REVIEW agent to diagnose failure.',
     );
 
+    // Mark DEBUG_REVIEW as RUNNING so the UI and agentStatus reflect live progress.
+    setAgentStatus(state, 'DEBUG_REVIEW', 'RUNNING');
+
     // DEPENDENCY ORDERING (requirement #4):
     //   DEBUG_REVIEW is only ever dispatched here, inside the RECOVERING
     //   state, which is only reachable from FAILED, which is only reachable
@@ -514,13 +526,34 @@ function applyTransition(
 }
 
 /**
- * Stores an AgentResult in `state.agentResults`, keyed by agent name.
+ * Stores an AgentResult in `state.agentResults`, keyed by agent name, and
+ * updates the corresponding agentStatus entry to reflect the outcome.
  * Updates `updatedAt` and emits an SSE event so the client sees live progress.
  */
 function storeResult(state: SupervisorTaskState, result: AgentResult): void {
   state.agentResults[result.agent as AgentName] = result;
+  setAgentStatus(state, result.agent, result.status === 'SUCCESS' ? 'SUCCESS' : 'FAILURE', result.completedAt);
   state.updatedAt = result.completedAt;
   emitSse(state.taskId, result);
+}
+
+/**
+ * Updates the agentStatus entry for a specific agent.
+ * If the agent is not yet in the array (shouldn't happen), appends a new entry.
+ */
+function setAgentStatus(
+  state: SupervisorTaskState,
+  agent: AgentName,
+  status: AgentRunStatus,
+  updatedAt?: string,
+): void {
+  const entry = state.agentStatus.find((e) => e.agent === agent);
+  if (entry) {
+    entry.status    = status;
+    entry.updatedAt = updatedAt ?? new Date().toISOString();
+  } else {
+    state.agentStatus.push({ agent, status, updatedAt: updatedAt ?? new Date().toISOString() });
+  }
 }
 
 /** Retrieves a state from the store, throwing if it does not exist. */

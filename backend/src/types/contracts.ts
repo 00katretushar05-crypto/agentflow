@@ -6,6 +6,43 @@
 
 export type AgentName = 'CODE_INTELLIGENCE' | 'TEST_QA' | 'DEBUG_REVIEW';
 
+/** Per-agent status summary — a lightweight view of each agent's current run state. */
+export type AgentRunStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILURE' | 'SKIPPED';
+
+export interface AgentStatusEntry {
+  agent: AgentName;
+  status: AgentRunStatus;
+  /** ISO timestamp of last update, or undefined if not yet started. */
+  updatedAt?: string;
+}
+
+/**
+ * A single evidence item derived from the audit trail — flat representation
+ * of one event (state transition or agent result) for the evidence endpoint.
+ */
+export interface EvidenceItem {
+  /** Monotonic sequence number within the run (1-based). */
+  seq: number;
+  type: 'TRANSITION' | 'AGENT_RESULT';
+  /** ISO timestamp of the event. */
+  timestamp: string;
+  /** Human-readable summary of the event. */
+  summary: string;
+  /** Raw payload — StateTransition or AgentResult. */
+  payload: StateTransition | AgentResult;
+}
+
+/** Compact row returned by GET /api/tasks (task list). */
+export interface TaskHistoryItem {
+  taskId: string;
+  goal: string;
+  status: SupervisorState;
+  retryCount: number;
+  maxRetries: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export type SupervisorState =
   | 'RECEIVED' | 'PLANNING' | 'ANALYZING' | 'IMPLEMENTING'
   | 'TESTING' | 'FAILED' | 'RECOVERING' | 'RETESTING'
@@ -82,6 +119,8 @@ export interface SupervisorTaskState {
   goal: string;
   status: SupervisorState;
   history: StateTransition[];
+  /** Per-agent run status — lightweight summary updated alongside agentResults. */
+  agentStatus: AgentStatusEntry[];
   agentResults: Partial<Record<AgentName, AgentResult>>;
   retryCount: number;
   /** Hard cap enforced by the Supervisor — prevents infinite retry loops in a live demo. */
