@@ -489,6 +489,22 @@ async function runVerificationPhase(state: SupervisorTaskState): Promise<void> {
 
   const { requirementsMet, testsPassed, testsExecuted, regressionPassed } = verification;
 
+  // If recovery was attempted (retryCount > 0), the pipeline reached VERIFYING via
+  // the recovery loop rather than cleanly.  Treat any run that required recovery as
+  // FAILED so the human-approval gate is only reached on a pristine first-pass run.
+  // This also guards against DEBUG_REVIEW applying a partial fix that happens to pass
+  // the existing tests while leaving the root cause unresolved in a real codebase.
+  if (state.retryCount > 0) {
+    applyTransition(
+      state,
+      'FAILED',
+      `Verification failed: ${state.retryCount} recovery attempt(s) were required. ` +
+      `A run that needed recovery cannot be auto-approved — retries exhausted or ` +
+      `recovery succeeded but the root cause may not be fully resolved.`,
+    );
+    return;
+  }
+
   // Strictly validate all three conditions before advancing.
   if (!requirementsMet || testsPassed !== testsExecuted || !regressionPassed) {
     applyTransition(
