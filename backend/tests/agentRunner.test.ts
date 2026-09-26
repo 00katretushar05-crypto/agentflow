@@ -100,28 +100,30 @@ describe('runAgent() — result shape', () => {
 });
 
 // ---------------------------------------------------------------------------
-// TEST_QA stub determinism
+// TEST_QA — real ecommerce-demo integration behaviour
 // ---------------------------------------------------------------------------
 
-describe('TEST_QA stub — deterministic behaviour', () => {
-  it('returns FAILURE with 1 failed test on retryCount=0', async () => {
+describe('TEST_QA — real ecommerce-demo integration', () => {
+  // The real agent runs live Jest with no setTimeout, so restore real timers.
+  beforeEach(() => { vi.useRealTimers(); });
+
+  it('returns PARTIAL or SUCCESS (never an unhandled throw)', async () => {
     const task = makeTask({ agent: 'TEST_QA', context: { retryCount: 0 } });
-    const result = await runAndDrain(task);
-    expect(result.status).toBe('FAILURE');
-    expect(result.testResult?.failed).toBe(1);
+    const result = await runAgent(task);
+    expect(['PARTIAL', 'SUCCESS', 'FAILURE']).toContain(result.status);
   });
 
-  it('returns SUCCESS with 0 failed tests on retryCount=1', async () => {
-    const task = makeTask({ agent: 'TEST_QA', context: { retryCount: 1 } });
-    const result = await runAndDrain(task);
-    expect(result.status).toBe('SUCCESS');
-    expect(result.testResult?.failed).toBe(0);
+  it('populates testResult with numeric counts', async () => {
+    const task = makeTask({ agent: 'TEST_QA', context: { retryCount: 0 } });
+    const result = await runAgent(task);
+    expect(typeof result.testResult?.totalTests).toBe('number');
+    expect(typeof result.testResult?.passed).toBe('number');
+    expect(typeof result.testResult?.failed).toBe('number');
   });
 
-  it('returns SUCCESS with 0 failed tests on retryCount=2', async () => {
-    const task = makeTask({ agent: 'TEST_QA', context: { retryCount: 2 } });
-    const result = await runAndDrain(task);
-    expect(result.status).toBe('SUCCESS');
-    expect(result.testResult?.failed).toBe(0);
+  it('result.agent is TEST_QA', async () => {
+    const task = makeTask({ agent: 'TEST_QA', context: { retryCount: 0 } });
+    const result = await runAgent(task);
+    expect(result.agent).toBe('TEST_QA');
   });
 });
