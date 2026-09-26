@@ -20,10 +20,10 @@
  *   and confirm the detector finds a conflict (checkout/discount files are both
  *   proposed for modification AND covered by the failing premium-discount test).
  */
-
+import { describe, test, expect } from 'vitest';
 import { detectConflict } from '../../src/supervisor/conflictDetector';
-import { runCodeIntelligenceAgent } from '../../src/agents/codeIntelligence';
-import { runTestQAAgent } from '../../src/agents/testQA';
+import { runCodeIntelligence } from '../../src/agents/codeIntelligence';
+import { runTestQA } from '../../src/agents/testQA';
 import type { AgentResult, AgentTask } from '../../src/types/contracts';
 
 // ---------------------------------------------------------------------------
@@ -263,13 +263,13 @@ describe('detectConflict — integration with real agents', () => {
       const goal = 'fix the premium customer discount calculation';
 
       const [ciResult, qaResult] = await Promise.all([
-        runCodeIntelligenceAgent({
+        runCodeIntelligence({
           taskId: 'int-ci-001',
           agent: 'CODE_INTELLIGENCE',
           goal,
           assignedAt: new Date().toISOString(),
         }),
-        runTestQAAgent({
+        runTestQA({
           taskId: 'int-qa-001',
           agent: 'TEST_QA',
           goal,
