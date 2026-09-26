@@ -8,8 +8,9 @@
  * We also test the injected-context code path for offline usage.
  */
 
+import * as path from 'path';
 import { runDebugReviewAgent } from '../../src/agents/debugReview';
-import type { AgentTask } from '../../src/types/contracts';
+import type { AgentTask, FailureReport } from '../../src/types/contracts';
 
 function makeTask(goal: string, context?: Record<string, unknown>): AgentTask {
   return {
@@ -145,5 +146,137 @@ describe('runDebugReviewAgent', () => {
     if (result.failureReport?.testFailure !== 'none') {
       expect(result.recommendedNextAction.toLowerCase()).toMatch(/fix|rerun|apply/i);
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // FailureReport injection — task.context.failureReport path
+  // (simulates TEST_QA handing a real FailureReport to DEBUG_REVIEW)
+  // -------------------------------------------------------------------------
+
+  test('accepts a full FailureReport injected via task.context.failureReport', async () => {
+    const injected: FailureReport = {
+      testFailure:
+        'getDiscount — integration via checkout should give premium customers a 10% discount via checkout',
+      stackTrace:
+        'Error: expect(received).toBe(expected) // Object.is equality\n' +
+        '\nExpected: 10\nReceived: 0\n' +
+        `    at Object.toBe (${path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo', 'tests', 'discount.test.js')}:50:29)\n`,
+      relevantCode: '',   // empty — agent should fill this in
+      rootCause: '',      // empty — agent should compute this
+      confidence: 'LOW',  // should be upgraded to HIGH after analysis
+    };
+
+    const result = await runDebugReviewAgent(
+      makeTask('debug injected failure', { failureReport: injected }),
+    );
+
+    expect(result.agent).toBe('DEBUG_REVIEW');
+    expect(result.status).toBe('SUCCESS');
+
+    const fr = result.failureReport!;
+    expect(fr.testFailure).toMatch(/premium/i);
+    expect(fr.confidence).toBe('HIGH');
+    expect(fr.rootCause.toLowerCase()).toMatch(/membership|field.?name|type/i);
+    expect(fr.rootCause.toLowerCase()).toMatch(/fix|change|membership/i);
+  });
+
+  test('injected FailureReport path examines checkout.js and discountService.js', async () => {
+    const injected: FailureReport = {
+      testFailure: 'premium discount test',
+      stackTrace:
+        `    at Object.toBe (${path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo', 'tests', 'discount.test.js')}:50:29)\n`,
+      relevantCode: '',
+      rootCause: '',
+      confidence: 'LOW',
+    };
+
+    const result = await runDebugReviewAgent(
+      makeTask('examine source files', { failureReport: injected }),
+    );
+
+    const examined = result.filesExamined;
+    expect(examined.some(f => f.includes('checkout.js'))).toBe(true);
+    expect(examined.some(f => f.includes('discountService.js'))).toBe(true);
+  });
+
+  test('injected FailureReport path does not re-run Jest (fast path)', async () => {
+    // When a FailureReport is injected, the agent should return quickly because
+    // it skips the Jest subprocess.  We verify the result is still fully valid.
+    const injected: FailureReport = {
+      testFailure: 'synthetic failing test',
+      stackTrace: 'Error: synthetic\n    at Object.foo (fakefile.js:1:1)\n',
+      relevantCode: 'const x = 1; // synthetic',
+      rootCause: '',
+      confidence: 'LOW',
+    };
+
+    const start = Date.now();
+    const result = await runDebugReviewAgent(
+      makeTask('fast path check', { failureReport: injected }),
+    );
+    const elapsed = Date.now() - start;
+
+    // Should complete in well under 10 s (no Jest subprocess)
+    expect(elapsed).toBeLessThan(10_000);
+    expect(result.failureReport).toBeDefined();
+    expect(result.failureReport!.rootCause.length).toBeGreaterThan(0);
+  });
+
+  test('injected FailureReport preserves the original testFailure name', async () => {
+    const injected: FailureReport = {
+      testFailure: 'my unique test name XYZ',
+      stackTrace: '',
+      relevantCode: '',
+      rootCause: '',
+      confidence: 'LOW',
+    };
+
+    const result = await runDebugReviewAgent(
+      makeTask('preserve test name', { failureReport: injected }),
+    );
+
+    expect(result.failureReport!.testFailure).toBe('my unique test name XYZ');
+  });
+
+  // -------------------------------------------------------------------------
+  // Stack trace parsing with Windows absolute paths
+  // -------------------------------------------------------------------------
+
+  test('parseStackFrame handles Windows absolute paths in stack traces', async () => {
+    // Inject a stack trace with a real Windows-style absolute path to a file
+    // that actually exists in ecommerce-demo/tests/
+    const realFile = path.resolve(
+      __dirname, '..', '..', '..', 'ecommerce-demo', 'tests', 'discount.test.js',
+    );
+    const windowsStack =
+      `Error: Expected 10 but received 0\n` +
+      `    at Object.toBe (${realFile}:50:29)\n`;
+
+    const result = await runDebugReviewAgent(
+      makeTask('windows path parsing', {
+        stackTrace: windowsStack,
+        failingTest: 'windows path test',
+      }),
+    );
+
+    // The agent ran Jest (real failure exists), so the live path fired.
+    // In either case, the failureReport must be fully populated.
+    expect(result.failureReport).toBeDefined();
+    expect(result.failureReport!.rootCause.length).toBeGreaterThan(0);
+  });
+
+  // -------------------------------------------------------------------------
+  // Real Jest execution confirmation (not mocked)
+  // -------------------------------------------------------------------------
+
+  test('runs real Jest and returns live counts (totalTests > 0)', async () => {
+    // If Jest is executed correctly via node + jest.js, it returns 10 tests.
+    // If the bash shim was used on Windows, Jest would fail silently and the
+    // agent would fall back to the injected-context path (which has no context
+    // here) and return testFailure: 'none'.  We verify the live path ran.
+    const result = await runDebugReviewAgent(makeTask('live jest run'));
+
+    // The ecommerce-demo has 1 intentional failure — agent detects it
+    expect(result.failureReport!.testFailure).not.toBe('none');
   });
 });

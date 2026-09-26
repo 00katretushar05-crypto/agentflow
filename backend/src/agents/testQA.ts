@@ -49,9 +49,10 @@ function relevanceScore(source: string, goal: string): number {
 
 /** Run Jest in the ecommerce-demo directory, returning raw JSON output. */
 function runJest(): string {
-  // Jest --json writes structured results to stdout
-  const jestBin = path.join(REPO_ROOT, 'node_modules', '.bin', 'jest');
-  const cmd = `"${jestBin}" --json --no-coverage 2>/dev/null`;
+  // Use node + jest.js directly so this works on Windows (the .bin/jest shim is
+  // a bash script and will fail on Windows with a SyntaxError).
+  const jestEntry = path.join(REPO_ROOT, 'node_modules', 'jest', 'bin', 'jest.js');
+  const cmd = `node "${jestEntry}" --json --no-coverage`;
 
   try {
     // Jest exits non-zero on test failures; we still want the stdout JSON

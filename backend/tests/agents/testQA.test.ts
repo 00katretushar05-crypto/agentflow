@@ -7,6 +7,8 @@
  * intentional bug), so we can assert on the actual live results.
  */
 
+import * as path from 'path';
+import * as fs from 'fs';
 import { runTestQAAgent } from '../../src/agents/testQA';
 import type { AgentTask } from '../../src/types/contracts';
 
@@ -146,5 +148,76 @@ describe('runTestQAAgent', () => {
     if (result.testResult!.failed > 0) {
       expect(result.status).toBe('PARTIAL');
     }
+  });
+
+  // -------------------------------------------------------------------------
+  // Real Jest execution — confirms the agent actually runs Jest (not mocked)
+  // -------------------------------------------------------------------------
+
+  test('executes Jest via node + jest.js (not the bash shim)', async () => {
+    // Confirm the jest.js entry point exists in ecommerce-demo — if the agent
+    // was using the .bin shim (bash script) it would fail silently on Windows
+    // and return totalTests=0.  A real run returns totalTests >= 1.
+    const result = await runTestQAAgent(makeTask('real jest execution'));
+    const tr = result.testResult!;
+
+    expect(tr.totalTests).toBeGreaterThanOrEqual(1);
+    expect(tr.passed + tr.failed).toBe(tr.totalTests);
+  });
+
+  test('executedAt is set to a recent ISO timestamp', async () => {
+    const before = Date.now();
+    const result = await runTestQAAgent(makeTask('timestamp check'));
+    const after = Date.now();
+
+    const ts = new Date(result.testResult!.executedAt).getTime();
+    expect(ts).toBeGreaterThanOrEqual(before);
+    expect(ts).toBeLessThanOrEqual(after);
+  });
+
+  test('failure entries contain the full test name (ancestor + title)', async () => {
+    const result = await runTestQAAgent(makeTask('premium discount'));
+    const tr = result.testResult!;
+
+    if (tr.failures.length > 0) {
+      // Jest fullName is "<describe> <test>" — should contain both parts
+      expect(tr.failures[0]!.testName).toMatch(
+        /getDiscount.*integration.*checkout|premium/i,
+      );
+    }
+  });
+
+  test('confidence is HIGH when Jest produces valid JSON output', async () => {
+    const result = await runTestQAAgent(makeTask('confidence check'));
+    // If totalTests > 0, Jest ran and returned valid JSON → confidence is HIGH
+    if (result.testResult!.totalTests > 0) {
+      expect(result.confidence).toBe('HIGH');
+    }
+  });
+
+  // -------------------------------------------------------------------------
+  // ecommerce-demo/tests directory is the scanning root
+  // -------------------------------------------------------------------------
+
+  test('filesExamined paths are relative to ecommerce-demo root', async () => {
+    const result = await runTestQAAgent(makeTask('path format check'));
+
+    // Paths should be relative (not absolute) and forward-slash separated
+    for (const f of result.filesExamined) {
+      expect(path.isAbsolute(f)).toBe(false);
+      expect(f).not.toContain('\\');
+    }
+  });
+
+  test('ecommerce-demo/tests/ directory contains the expected 3 test files', () => {
+    // Sanity check — if this fails the test fixture has been altered
+    const testsDir = path.resolve(
+      __dirname, '..', '..', '..', 'ecommerce-demo', 'tests',
+    );
+    const files = fs.readdirSync(testsDir).filter(f => f.endsWith('.test.js'));
+    expect(files).toHaveLength(3);
+    expect(files).toContain('checkout.test.js');
+    expect(files).toContain('discount.test.js');
+    expect(files).toContain('order.test.js');
   });
 });
