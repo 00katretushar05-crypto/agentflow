@@ -101,10 +101,34 @@ export interface AgentResult {
   failureReport?: FailureReport;
   filesExamined: string[];
   filesModified: string[];
+  /**
+   * Files that CODE_INTELLIGENCE recommends modifying to fulfil the task goal.
+   * Populated only by the CODE_INTELLIGENCE agent.
+   */
+  proposedModifications?: string[];
+  /**
+   * Files that TEST_QA has flagged as "do not modify" due to fragile existing
+   * test coverage.  Populated only by the TEST_QA agent.
+   */
+  doNotModify?: string[];
   confidence: 'LOW' | 'MEDIUM' | 'HIGH';
   recommendedNextAction: string;
   /** ISO timestamp when this result was produced. */
   completedAt: string;
+}
+
+/**
+ * Produced by the Supervisor when CODE_INTELLIGENCE proposes modifying a file
+ * that TEST_QA has flagged as "do not modify".
+ */
+export interface ConflictReport {
+  conflictingFiles: string[];
+  codeIntelligenceResult: AgentResult;
+  testQAResult: AgentResult;
+  /** Human-readable explanation of why this is a conflict. */
+  reason: string;
+  /** ISO timestamp when the conflict was detected. */
+  detectedAt: string;
 }
 
 /** A single entry in the Supervisor's state transition history — this IS your audit trail / evidence ledger backbone. */

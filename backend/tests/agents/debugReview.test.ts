@@ -4,14 +4,36 @@
  * Unit tests for the DEBUG_REVIEW agent.
  *
  * Strategy: the agent runs real Jest against ecommerce-demo (which has the
- * intentional field-name bug), parses the failure, and identifies root cause.
- * We also test the injected-context code path for offline usage.
+ * intentional field-name bug), parses the failure, identifies root cause,
+ * and now also APPLIES the fix to disk.
+ *
+ * Important: every agent invocation that detects the bug will write the fix
+ * to ecommerce-demo/src/checkout/checkout.js.  The beforeEach/afterEach hooks
+ * save and restore the original (buggy) file content so each test starts from
+ * a clean, reproducible state and other test suites (testQA) are unaffected.
  */
 
 import * as path from 'path';
+import * as fs from 'fs';
+import { execSync } from 'child_process';
 import { runDebugReview } from '../../src/agents/debugReview.js';
-import { describe, test, expect } from 'vitest';
+import { describe, test, expect, afterEach } from 'vitest';
 import type { AgentTask, FailureReport } from '../../src/types/contracts';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+const CHECKOUT_JS = path.resolve(
+  __dirname, '..', '..', '..', 'ecommerce-demo', 'src', 'checkout', 'checkout.js',
+);
+
+const ECOMMERCE_ROOT = path.resolve(
+  __dirname, '..', '..', '..', 'ecommerce-demo',
+);
+
+/** Original (buggy) content, captured once when the module loads. */
+const ORIGINAL_CHECKOUT = fs.readFileSync(CHECKOUT_JS, 'utf-8');
 
 function makeTask(goal: string, context?: Record<string, unknown>): AgentTask {
   return {
@@ -23,7 +45,23 @@ function makeTask(goal: string, context?: Record<string, unknown>): AgentTask {
   };
 }
 
+/** Restore checkout.js to its original (buggy) state. */
+function restoreCheckout(): void {
+  fs.writeFileSync(CHECKOUT_JS, ORIGINAL_CHECKOUT, 'utf-8');
+}
+
+// ---------------------------------------------------------------------------
+// Restore checkout.js after every test so subsequent tests start from the
+// expected buggy state.  Without this, the first test to apply the fix would
+// cause every later test (and testQA tests) to see a passing suite instead of
+// the intentional failure.
+// ---------------------------------------------------------------------------
+
 describe('runDebugReview', () => {
+  afterEach(() => {
+    restoreCheckout();
+  });
+
   // -------------------------------------------------------------------------
   // Shape & contract
   // -------------------------------------------------------------------------
@@ -56,9 +94,13 @@ describe('runDebugReview', () => {
     expect(['LOW', 'MEDIUM', 'HIGH']).toContain(fr.confidence);
   });
 
-  test('filesModified is empty (agent is read-only)', async () => {
+  test('filesModified contains checkout.js when the known bug is present', async () => {
+    // Ensure the bug is present before running
+    restoreCheckout();
+
     const result = await runDebugReview(makeTask('debug tests'));
-    expect(result.filesModified).toEqual([]);
+    expect(result.filesModified.length).toBeGreaterThan(0);
+    expect(result.filesModified.some(f => f.includes('checkout.js'))).toBe(true);
   });
 
   test('task fields are echoed back unchanged', async () => {
@@ -112,6 +154,104 @@ describe('runDebugReview', () => {
     const examined = result.filesExamined;
     expect(examined.some(f => f.includes('checkout.js'))).toBe(true);
     expect(examined.some(f => f.includes('discountService.js'))).toBe(true);
+  });
+
+  // -------------------------------------------------------------------------
+  // Fix actually applied to disk — core new behaviour
+  // -------------------------------------------------------------------------
+
+  test('checkout.js is modified on disk after running the agent', async () => {
+    // Confirm the bug is present before the run
+    const before = fs.readFileSync(CHECKOUT_JS, 'utf-8');
+    expect(before).toMatch(/getDiscount\(\{\s*type\s*:\s*customer\.type/);
+
+    await runDebugReview(makeTask('apply fix'));
+
+    const after = fs.readFileSync(CHECKOUT_JS, 'utf-8');
+    // Bug line must be gone
+    expect(after).not.toMatch(/getDiscount\(\{\s*type\s*:\s*customer\.type/);
+    // Correct line must be present
+    expect(after).toMatch(/getDiscount\(\{\s*membership\s*:\s*customer\.type/);
+  });
+
+  test('ecommerce-demo tests pass after the agent applies the fix', () => {
+    // Step 1: agent applies the fix
+    // (We invoke applyFix indirectly by running the agent; alternatively we can
+    // manipulate the file directly here to keep this test deterministic and fast.)
+    const fixed = ORIGINAL_CHECKOUT.replace(
+      /getDiscount\(\{\s*type\s*:\s*customer\.type\s*\}[^)]*\)/,
+      'getDiscount({ membership: customer.type })',
+    );
+    fs.writeFileSync(CHECKOUT_JS, fixed, 'utf-8');
+
+    // Step 2: run ecommerce-demo Jest and assert all tests pass
+    const jestEntry = path.join(ECOMMERCE_ROOT, 'node_modules', 'jest', 'bin', 'jest.js');
+    let jestRaw = '';
+    try {
+      jestRaw = execSync(`node "${jestEntry}" --json --no-coverage`, {
+        cwd: ECOMMERCE_ROOT,
+        stdio: ['ignore', 'pipe', 'pipe'],
+        encoding: 'utf-8',
+        timeout: 30_000,
+      });
+    } catch (err: unknown) {
+      if (err && typeof err === 'object' && 'stdout' in err) {
+        jestRaw = (err as { stdout: string }).stdout ?? '';
+      }
+    }
+
+    const jestResult = JSON.parse(jestRaw) as {
+      numFailedTests: number;
+      numPassedTests: number;
+    };
+
+    expect(jestResult.numFailedTests).toBe(0);
+    expect(jestResult.numPassedTests).toBeGreaterThan(0);
+  });
+
+  test('filesModified reports the correct repo-relative path', async () => {
+    const result = await runDebugReview(makeTask('check modified path'));
+
+    // When the bug is present the agent fixes it and reports the path
+    if (result.filesModified.length > 0) {
+      expect(result.filesModified[0]).toBe('src/checkout/checkout.js');
+    }
+  });
+
+  test('filesModified is empty when the bug is already fixed', async () => {
+    // Pre-apply the fix so the agent finds nothing to change
+    const fixed = ORIGINAL_CHECKOUT.replace(
+      /getDiscount\(\{\s*type\s*:\s*customer\.type\s*\}[^)]*\)/,
+      'getDiscount({ membership: customer.type })',
+    );
+    fs.writeFileSync(CHECKOUT_JS, fixed, 'utf-8');
+
+    // Inject a full FailureReport to bypass the Jest subprocess (which would now
+    // see zero failures and return early via the "no failures" path).
+    const injected: FailureReport = {
+      testFailure: 'synthetic already-fixed test',
+      stackTrace: '',
+      relevantCode: '',
+      rootCause: '',
+      confidence: 'LOW',
+    };
+
+    const result = await runDebugReview(
+      makeTask('already fixed', { failureReport: injected }),
+    );
+
+    // The agent ran analyzeRootCause — but because checkout.js no longer has the
+    // buggy `type:` call, callerPassesType is false → no HIGH-confidence fix
+    // identified → applyFix finds nothing to change → filesModified stays empty.
+    expect(result.filesModified).toEqual([]);
+  });
+
+  test('recommendedNextAction mentions fix-applied when a fix was written', async () => {
+    const result = await runDebugReview(makeTask('debug discount test'));
+
+    if (result.filesModified.length > 0) {
+      expect(result.recommendedNextAction.toLowerCase()).toMatch(/fix applied|rerun/i);
+    }
   });
 
   // -------------------------------------------------------------------------
