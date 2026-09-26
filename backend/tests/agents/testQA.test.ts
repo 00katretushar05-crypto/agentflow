@@ -6,12 +6,11 @@
  * Strategy: the agent runs real Jest against ecommerce-demo (which has the
  * intentional bug), so we can assert on the actual live results.
  */
-
+import { describe, test, expect } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
-import { runTestQAAgent } from '../../src/agents/testQA';
+import { runTestQA } from '../../src/agents/testQA.js';
 import type { AgentTask } from '../../src/types/contracts';
-
 function makeTask(goal: string, overrides: Partial<AgentTask> = {}): AgentTask {
   return {
     taskId: 'test-qa-001',
@@ -22,13 +21,13 @@ function makeTask(goal: string, overrides: Partial<AgentTask> = {}): AgentTask {
   };
 }
 
-describe('runTestQAAgent', () => {
+describe('runTestQA', () => {
   // -------------------------------------------------------------------------
   // Shape & contract  (these pass regardless of Jest availability)
   // -------------------------------------------------------------------------
 
   test('returns a valid AgentResult with all required fields', async () => {
-    const result = await runTestQAAgent(makeTask('fix discount bug'));
+    const result = await runTestQA(makeTask('fix discount bug'));
 
     expect(result.agent).toBe('TEST_QA');
     expect(['SUCCESS', 'FAILURE', 'PARTIAL']).toContain(result.status);
@@ -43,7 +42,7 @@ describe('runTestQAAgent', () => {
   });
 
   test('populates testResult with required fields', async () => {
-    const result = await runTestQAAgent(makeTask('fix discount bug'));
+    const result = await runTestQA(makeTask('fix discount bug'));
 
     expect(result.testResult).toBeDefined();
     const tr = result.testResult!;
@@ -56,13 +55,13 @@ describe('runTestQAAgent', () => {
   });
 
   test('filesModified is empty (agent is read-only)', async () => {
-    const result = await runTestQAAgent(makeTask('discount test coverage'));
+    const result = await runTestQA(makeTask('discount test coverage'));
     expect(result.filesModified).toEqual([]);
   });
 
   test('task fields are echoed back unchanged', async () => {
     const task = makeTask('some goal', { taskId: 'echo-qa', context: { env: 'test' } });
-    const result = await runTestQAAgent(task);
+    const result = await runTestQA(task);
 
     expect(result.task.taskId).toBe('echo-qa');
     expect(result.task.goal).toBe('some goal');
@@ -74,7 +73,7 @@ describe('runTestQAAgent', () => {
   // -------------------------------------------------------------------------
 
   test('discovers existing test files in ecommerce-demo/tests/', async () => {
-    const result = await runTestQAAgent(makeTask('discount tests'));
+    const result = await runTestQA(makeTask('discount tests'));
 
     const examined = result.filesExamined;
     expect(examined.length).toBeGreaterThan(0);
@@ -88,7 +87,7 @@ describe('runTestQAAgent', () => {
   // -------------------------------------------------------------------------
 
   test('detects the intentional failing test — premium discount integration', async () => {
-    const result = await runTestQAAgent(makeTask('premium customer discount'));
+    const result = await runTestQA(makeTask('premium customer discount'));
     const tr = result.testResult!;
 
     // ecommerce-demo has exactly 1 intentionally failing test
@@ -103,14 +102,14 @@ describe('runTestQAAgent', () => {
   });
 
   test('passed count + failed count equals total count', async () => {
-    const result = await runTestQAAgent(makeTask('checkout discount'));
+    const result = await runTestQA(makeTask('checkout discount'));
     const tr = result.testResult!;
 
     expect(tr.passed + tr.failed).toBe(tr.totalTests);
   });
 
   test('most tests pass (only 1 intentional failure exists)', async () => {
-    const result = await runTestQAAgent(makeTask('all tests'));
+    const result = await runTestQA(makeTask('all tests'));
     const tr = result.testResult!;
 
     // ecommerce-demo: 8 tests total, 7 pass, 1 fails
@@ -119,7 +118,7 @@ describe('runTestQAAgent', () => {
   });
 
   test('failure entry has testName, expected and received fields', async () => {
-    const result = await runTestQAAgent(makeTask('premium discount'));
+    const result = await runTestQA(makeTask('premium discount'));
     const tr = result.testResult!;
 
     if (tr.failures.length > 0) {
@@ -135,7 +134,7 @@ describe('runTestQAAgent', () => {
   // -------------------------------------------------------------------------
 
   test('recommendedNextAction mentions DEBUG_REVIEW when tests fail', async () => {
-    const result = await runTestQAAgent(makeTask('run all tests'));
+    const result = await runTestQA(makeTask('run all tests'));
 
     if (result.testResult!.failed > 0) {
       expect(result.recommendedNextAction.toLowerCase()).toMatch(/debug|escalate/i);
@@ -143,7 +142,7 @@ describe('runTestQAAgent', () => {
   });
 
   test('status is PARTIAL when failures exist', async () => {
-    const result = await runTestQAAgent(makeTask('run all tests'));
+    const result = await runTestQA(makeTask('run all tests'));
 
     if (result.testResult!.failed > 0) {
       expect(result.status).toBe('PARTIAL');
@@ -158,7 +157,7 @@ describe('runTestQAAgent', () => {
     // Confirm the jest.js entry point exists in ecommerce-demo — if the agent
     // was using the .bin shim (bash script) it would fail silently on Windows
     // and return totalTests=0.  A real run returns totalTests >= 1.
-    const result = await runTestQAAgent(makeTask('real jest execution'));
+    const result = await runTestQA(makeTask('real jest execution'));
     const tr = result.testResult!;
 
     expect(tr.totalTests).toBeGreaterThanOrEqual(1);
@@ -167,7 +166,7 @@ describe('runTestQAAgent', () => {
 
   test('executedAt is set to a recent ISO timestamp', async () => {
     const before = Date.now();
-    const result = await runTestQAAgent(makeTask('timestamp check'));
+    const result = await runTestQA(makeTask('timestamp check'));
     const after = Date.now();
 
     const ts = new Date(result.testResult!.executedAt).getTime();
@@ -176,7 +175,7 @@ describe('runTestQAAgent', () => {
   });
 
   test('failure entries contain the full test name (ancestor + title)', async () => {
-    const result = await runTestQAAgent(makeTask('premium discount'));
+    const result = await runTestQA(makeTask('premium discount'));
     const tr = result.testResult!;
 
     if (tr.failures.length > 0) {
@@ -188,7 +187,7 @@ describe('runTestQAAgent', () => {
   });
 
   test('confidence is HIGH when Jest produces valid JSON output', async () => {
-    const result = await runTestQAAgent(makeTask('confidence check'));
+    const result = await runTestQA(makeTask('confidence check'));
     // If totalTests > 0, Jest ran and returned valid JSON → confidence is HIGH
     if (result.testResult!.totalTests > 0) {
       expect(result.confidence).toBe('HIGH');
@@ -200,7 +199,7 @@ describe('runTestQAAgent', () => {
   // -------------------------------------------------------------------------
 
   test('filesExamined paths are relative to ecommerce-demo root', async () => {
-    const result = await runTestQAAgent(makeTask('path format check'));
+    const result = await runTestQA(makeTask('path format check'));
 
     // Paths should be relative (not absolute) and forward-slash separated
     for (const f of result.filesExamined) {
