@@ -1,93 +1,194 @@
 /**
- * testQA.ts — TEST_QA agent stub.
+ * testQA.ts
  *
- * DEMO DETERMINISM RULE (from AGENTS.md):
- *   - On retryCount === 0 → fails (1 test failure), simulating a first-run
- *     regression that the DEBUG_REVIEW agent must diagnose.
- *   - On retryCount >= 1 → passes, simulating a successful re-run after the
- *     fix has been applied.
- *
- * retryCount is read from AgentTask.context.retryCount (injected by the
- * Supervisor before each dispatch).  Fixed setTimeout delay — no Math.random.
+ * TEST_QA agent — inspects ecommerce-demo/tests/, identifies relevant and
+ * missing tests for the task goal, then executes the Jest suite and captures
+ * structured pass/fail results.
  */
 
-import type { AgentTask, AgentResult } from '../types/contracts.js';
+import * as fs from 'fs';
+import * as path from 'path';
+import { execSync } from 'child_process';
+import { fileURLToPath } from 'node:url';
+import type { AgentTask, AgentResult, TestResult } from '../types/contracts.js';
 
-/** Simulated test-run latency in milliseconds — fixed, never random. */
-const STUB_DELAY_MS = 1000;
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-/**
- * Runs the relevant test suite for the given task and returns a TestResult.
- *
- * Behaviour is controlled by `task.context.retryCount`:
- *   - 0 → one failing test (triggers the FAILED → RECOVERING path)
- *   - ≥1 → all tests pass (triggers the VERIFYING path)
- *
- * @param task - The AgentTask assigned by the Supervisor, must contain
- *   `context.retryCount` (number).
- */
-export async function runTestQA(task: AgentTask): Promise<AgentResult> {
-  await delay(STUB_DELAY_MS);
-
-  const retryCount =
-    typeof task.context?.retryCount === 'number' ? task.context.retryCount : 0;
-
-  const isFirstAttempt = retryCount === 0;
-  const now = new Date().toISOString();
-
-  if (isFirstAttempt) {
-    // First attempt: one test fails — intentional demo failure to exercise the
-    // recovery/debug path.
-    return {
-      agent: 'TEST_QA',
-      status: 'FAILURE',
-      task,
-      testResult: {
-        totalTests: 12,
-        passed: 11,
-        failed: 1,
-        failures: [
-          {
-            testName: 'POST /api/auth/login — rate limit header present',
-            expected: 'X-RateLimit-Remaining: 9',
-            received: 'Header not found',
-          },
-        ],
-        executedAt: now,
-      },
-      filesExamined: ['tests/auth.test.ts'],
-      filesModified: [],
-      confidence: 'HIGH',
-      recommendedNextAction:
-        'Rate-limit header is missing.  Route to DEBUG_REVIEW for root-cause analysis.',
-      completedAt: now,
-    };
-  }
-
-  // Subsequent attempts: all tests pass — recovery was successful.
-  return {
-    agent: 'TEST_QA',
-    status: 'SUCCESS',
-    task,
-    testResult: {
-      totalTests: 12,
-      passed: 12,
-      failed: 0,
-      failures: [],
-      executedAt: now,
-    },
-    filesExamined: ['tests/auth.test.ts'],
-    filesModified: [],
-    confidence: 'HIGH',
-    recommendedNextAction: 'All tests pass — proceed to VERIFYING.',
-    completedAt: now,
-  };
-}
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo');
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
 
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
+function collectTestFiles(dir: string): string[] {
+  const results: string[] = [];
+  if (!fs.existsSync(dir)) return results;
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...collectTestFiles(fullPath));
+    } else if (entry.isFile() && /\.test\.[jt]s$/.test(entry.name)) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
+function relevanceScore(source: string, goal: string): number {
+  const goalWords = goal.toLowerCase().split(/\W+/).filter(w => w.length > 3);
+  const lowerSource = source.toLowerCase();
+  return goalWords.reduce((acc, word) => acc + (lowerSource.includes(word) ? 1 : 0), 0);
+}
+
+function runJest(): string {
+  const jestEntry = path.join(REPO_ROOT, 'node_modules', 'jest', 'bin', 'jest.js');
+  const cmd = `node "${jestEntry}" --json --no-coverage`;
+
+  try {
+    return execSync(cmd, {
+      cwd: REPO_ROOT,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      encoding: 'utf-8',
+      timeout: 30_000,
+    });
+  } catch (err: unknown) {
+    if (err && typeof err === 'object' && 'stdout' in err) {
+      return (err as { stdout: string }).stdout ?? '';
+    }
+    return '';
+  }
+}
+
+interface JestAssertionResult {
+  title: string;
+  fullName: string;
+  status: 'passed' | 'failed' | 'pending';
+  failureMessages: string[];
+}
+
+interface JestTestSuiteResult {
+  testFilePath: string;
+  assertionResults: JestAssertionResult[];
+}
+
+interface JestJsonOutput {
+  success: boolean;
+  numTotalTests: number;
+  numPassedTests: number;
+  numFailedTests: number;
+  testResults: JestTestSuiteResult[];
+}
+
+// ---------------------------------------------------------------------------
+// Public agent entry-point
+// ---------------------------------------------------------------------------
+
+export async function runTestQA(task: AgentTask): Promise<AgentResult> {
+  const testsDir = path.join(REPO_ROOT, 'tests');
+  const allTestFiles = collectTestFiles(testsDir);
+
+  const filesExamined = allTestFiles.map(f =>
+    path.relative(REPO_ROOT, f).replace(/\\/g, '/'),
+  );
+
+  const relevantFiles = allTestFiles.filter(absPath => {
+    const source = fs.readFileSync(absPath, 'utf-8');
+    return relevanceScore(source, task.goal) > 0;
+  });
+
+  const raw = runJest();
+
+  let jestOutput: JestJsonOutput | null = null;
+  try {
+    jestOutput = JSON.parse(raw) as JestJsonOutput;
+  } catch {
+    // JSON parse failed — Jest may not be installed in ecommerce-demo
+  }
+
+  let testResult: TestResult;
+
+  if (jestOutput !== null) {
+    const failures = jestOutput.testResults
+      .flatMap(suite => suite.assertionResults ?? [])
+      .filter(t => t.status === 'failed')
+      .map(t => ({
+        testName: t.fullName,
+        expected: extractExpected(t.failureMessages[0] ?? ''),
+        received: extractReceived(t.failureMessages[0] ?? ''),
+      }));
+
+    testResult = {
+      totalTests: jestOutput.numTotalTests,
+      passed: jestOutput.numPassedTests,
+      failed: jestOutput.numFailedTests,
+      failures,
+      executedAt: new Date().toISOString(),
+    };
+  } else {
+    testResult = {
+      totalTests: 0,
+      passed: 0,
+      failed: 0,
+      failures: [],
+      executedAt: new Date().toISOString(),
+    };
+  }
+
+  const srcDir = path.join(REPO_ROOT, 'src');
+  const testedModules = new Set(
+    allTestFiles.map(f => path.basename(f).replace(/\.test\.[jt]s$/, '')),
+  );
+  const srcModules = fs.existsSync(srcDir)
+    ? fs.readdirSync(srcDir, { withFileTypes: true })
+        .filter(e => e.isDirectory())
+        .map(e => e.name)
+    : [];
+  const untestedModules = srcModules.filter(m => !testedModules.has(m));
+
+  const hasMissingTests = untestedModules.length > 0;
+  const missingNote = hasMissingTests
+    ? ` Missing test coverage for modules: ${untestedModules.join(', ')}.`
+    : '';
+
+  const regressionRisk = testResult.failed > 0
+    ? `${testResult.failed} test(s) failing — regression risk is HIGH.`
+    : 'All tests passing — regression risk is LOW.';
+
+  const relevantNote = relevantFiles.length > 0
+    ? `Relevant test files for goal: ${relevantFiles.map(f => path.relative(REPO_ROOT, f).replace(/\\/g, '/')).join(', ')}.`
+    : 'No test files matched goal keywords directly.';
+
+  const status =
+    testResult.totalTests === 0
+      ? ('PARTIAL' as const)
+      : testResult.failed === 0
+        ? ('SUCCESS' as const)
+        : ('PARTIAL' as const);
+
+  return {
+    agent: 'TEST_QA',
+    status,
+    task,
+    testResult,
+    filesExamined,
+    filesModified: [],
+    confidence: jestOutput !== null ? 'HIGH' : 'LOW',
+    recommendedNextAction:
+      testResult.failed > 0
+        ? `Escalate ${testResult.failed} failing test(s) to DEBUG_REVIEW agent. ${regressionRisk}${missingNote} ${relevantNote}`
+        : `All tests pass. ${missingNote} ${relevantNote}`,
+    completedAt: new Date().toISOString(),
+  };
+}
+
+function extractExpected(msg: string): string {
+  const m = msg.match(/Expected[^:]*:\s*(.+)/);
+  return m?.[1]?.trim() ?? '(see failure message)';
+}
+
+function extractReceived(msg: string): string {
+  const m = msg.match(/Received[^:]*:\s*(.+)/);
+  return m?.[1]?.trim() ?? '(see failure message)';
 }
