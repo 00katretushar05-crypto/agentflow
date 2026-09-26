@@ -16,7 +16,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
-import { runDebugReviewAgent } from '../../src/agents/debugReview';
+import { runDebugReview } from '../../src/agents/debugReview.js';
+import { describe, test, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import type { AgentTask, FailureReport } from '../../src/types/contracts';
 
 // ---------------------------------------------------------------------------
@@ -31,8 +32,53 @@ const ECOMMERCE_ROOT = path.resolve(
   __dirname, '..', '..', '..', 'ecommerce-demo',
 );
 
-/** Original (buggy) content, captured once when the module loads. */
-const ORIGINAL_CHECKOUT = fs.readFileSync(CHECKOUT_JS, 'utf-8');
+/** Original (buggy) content — hardcoded to guarantee it is always the buggy version
+ *  regardless of the checkout.js state on disk at module-load time.
+ */
+const ORIGINAL_CHECKOUT = `/**
+ * checkout.js
+ * Handles the checkout flow: looks up the customer, applies a discount,
+ * and delegates order creation to orderService.
+ *
+ * ⚠️  INTENTIONAL DEMO BUG — hackathon target
+ *     Line marked [BUG] below passes \`customer.type\` to discountService,
+ *     but discountService.getDiscount() expects \`customer.membership\`.
+ *     Because the field names differ, premium customers receive 0 % discount
+ *     instead of the required 10 % (see requirements.md).
+ *
+ *     Fix: change \`type: customer.type\` → \`membership: customer.type\`
+ *     (or align the field name used across both modules).
+ */
+
+const { getDiscount } = require('../discounts/discountService');
+const { createOrder } = require('../orders/orderService');
+const { getUserById } = require('../users/userService');
+
+/**
+ * Processes checkout for a user.
+ * @param {string} userId
+ * @param {Array<{ id: string, price: number }>} items
+ * @returns {{ orderId: string, total: number, discount: number }}
+ */
+function checkout(userId, items) {
+  const customer = getUserById(userId);
+
+  const subtotal = items.reduce((sum, item) => sum + item.price, 0);
+
+  // [BUG] Should be { membership: customer.type } so discountService can
+  //       detect premium status.  Using \`type\` means membership is undefined
+  //       inside getDiscount(), so the 10 % branch is never reached.
+  const discountRate = getDiscount({ type: customer.type }); // ← INTENTIONAL BUG
+
+  const discount = subtotal * discountRate;
+  const total = subtotal - discount;
+
+  const order = createOrder({ userId, items, total, discount });
+
+  return { orderId: order.id, total, discount };
+}
+
+module.exports = { checkout };`;
 
 function makeTask(goal: string, context?: Record<string, unknown>): AgentTask {
   return {
@@ -56,17 +102,25 @@ function restoreCheckout(): void {
 // the intentional failure.
 // ---------------------------------------------------------------------------
 
-afterEach(() => {
-  restoreCheckout();
-});
+describe('runDebugReview', () => {
+  beforeEach(() => {
+    restoreCheckout();
+  });
 
-// ---------------------------------------------------------------------------
-// Shape & contract
-// ---------------------------------------------------------------------------
+  afterEach(() => {
+    restoreCheckout();
+  });
 
-describe('runDebugReviewAgent', () => {
+  afterAll(() => {
+    restoreCheckout();
+  });
+
+  // -------------------------------------------------------------------------
+  // Shape & contract
+  // -------------------------------------------------------------------------
+
   test('returns a valid AgentResult with all required fields', async () => {
-    const result = await runDebugReviewAgent(makeTask('investigate failing tests'));
+    const result = await runDebugReview(makeTask('investigate failing tests'));
 
     expect(result.agent).toBe('DEBUG_REVIEW');
     expect(['SUCCESS', 'FAILURE', 'PARTIAL']).toContain(result.status);
@@ -81,7 +135,7 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('populates failureReport with required fields', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount failure'));
+    const result = await runDebugReview(makeTask('debug discount failure'));
 
     expect(result.failureReport).toBeDefined();
     const fr = result.failureReport!;
@@ -97,14 +151,14 @@ describe('runDebugReviewAgent', () => {
     // Ensure the bug is present before running
     restoreCheckout();
 
-    const result = await runDebugReviewAgent(makeTask('debug tests'));
+    const result = await runDebugReview(makeTask('debug tests'));
     expect(result.filesModified.length).toBeGreaterThan(0);
     expect(result.filesModified.some(f => f.includes('checkout.js'))).toBe(true);
   });
 
   test('task fields are echoed back unchanged', async () => {
     const task = makeTask('some goal', { traceId: 'abc' });
-    const result = await runDebugReviewAgent(task);
+    const result = await runDebugReview(task);
 
     expect(result.task.taskId).toBe('test-dbg-001');
     expect(result.task.goal).toBe('some goal');
@@ -116,7 +170,7 @@ describe('runDebugReviewAgent', () => {
   // -------------------------------------------------------------------------
 
   test('detects the intentional premium discount failure', async () => {
-    const result = await runDebugReviewAgent(makeTask('why does premium discount fail'));
+    const result = await runDebugReview(makeTask('why does premium discount fail'));
     const fr = result.failureReport!;
 
     // There is a live failing test in ecommerce-demo
@@ -125,7 +179,7 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('root cause identifies the field-name mismatch with HIGH confidence', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount regression'));
+    const result = await runDebugReview(makeTask('debug discount regression'));
     const fr = result.failureReport!;
 
     // The agent reads checkout.js + discountService.js and detects the mismatch
@@ -134,21 +188,21 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('rootCause includes a proposed minimal fix', async () => {
-    const result = await runDebugReviewAgent(makeTask('fix premium customer discount'));
+    const result = await runDebugReview(makeTask('fix premium customer discount'));
     const fr = result.failureReport!;
 
     expect(fr.rootCause.toLowerCase()).toMatch(/fix|change|membership/i);
   });
 
   test('stackTrace is non-empty for live failure', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug failing test'));
+    const result = await runDebugReview(makeTask('debug failing test'));
     const fr = result.failureReport!;
 
     expect(fr.stackTrace.length).toBeGreaterThan(0);
   });
 
   test('examines checkout.js and discountService.js', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount'));
+    const result = await runDebugReview(makeTask('debug discount'));
 
     const examined = result.filesExamined;
     expect(examined.some(f => f.includes('checkout.js'))).toBe(true);
@@ -164,7 +218,7 @@ describe('runDebugReviewAgent', () => {
     const before = fs.readFileSync(CHECKOUT_JS, 'utf-8');
     expect(before).toMatch(/getDiscount\(\{\s*type\s*:\s*customer\.type/);
 
-    await runDebugReviewAgent(makeTask('apply fix'));
+    await runDebugReview(makeTask('apply fix'));
 
     const after = fs.readFileSync(CHECKOUT_JS, 'utf-8');
     // Bug line must be gone
@@ -209,7 +263,7 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('filesModified reports the correct repo-relative path', async () => {
-    const result = await runDebugReviewAgent(makeTask('check modified path'));
+    const result = await runDebugReview(makeTask('check modified path'));
 
     // When the bug is present the agent fixes it and reports the path
     if (result.filesModified.length > 0) {
@@ -235,7 +289,7 @@ describe('runDebugReviewAgent', () => {
       confidence: 'LOW',
     };
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('already fixed', { failureReport: injected }),
     );
 
@@ -246,7 +300,7 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('recommendedNextAction mentions fix-applied when a fix was written', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount test'));
+    const result = await runDebugReview(makeTask('debug discount test'));
 
     if (result.filesModified.length > 0) {
       expect(result.recommendedNextAction.toLowerCase()).toMatch(/fix applied|rerun/i);
@@ -263,7 +317,7 @@ describe('runDebugReviewAgent', () => {
       'Error: Expected 10 but received 0\n' +
       '    at Object.<anonymous> (tests/discount.test.js:50:5)\n';
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('diagnose injected failure', {
         failingTest: 'injected test name',
         stackTrace: fakeStack,
@@ -281,7 +335,7 @@ describe('runDebugReviewAgent', () => {
   // -------------------------------------------------------------------------
 
   test('recommendedNextAction mentions rerun or fix when failure detected', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount test'));
+    const result = await runDebugReview(makeTask('debug discount test'));
 
     if (result.failureReport?.testFailure !== 'none') {
       expect(result.recommendedNextAction.toLowerCase()).toMatch(/fix|rerun|apply/i);
@@ -306,7 +360,7 @@ describe('runDebugReviewAgent', () => {
       confidence: 'LOW',  // should be upgraded to HIGH after analysis
     };
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('debug injected failure', { failureReport: injected }),
     );
 
@@ -330,7 +384,7 @@ describe('runDebugReviewAgent', () => {
       confidence: 'LOW',
     };
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('examine source files', { failureReport: injected }),
     );
 
@@ -351,7 +405,7 @@ describe('runDebugReviewAgent', () => {
     };
 
     const start = Date.now();
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('fast path check', { failureReport: injected }),
     );
     const elapsed = Date.now() - start;
@@ -371,7 +425,7 @@ describe('runDebugReviewAgent', () => {
       confidence: 'LOW',
     };
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('preserve test name', { failureReport: injected }),
     );
 
@@ -392,7 +446,7 @@ describe('runDebugReviewAgent', () => {
       `Error: Expected 10 but received 0\n` +
       `    at Object.toBe (${realFile}:50:29)\n`;
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('windows path parsing', {
         stackTrace: windowsStack,
         failingTest: 'windows path test',
@@ -414,7 +468,7 @@ describe('runDebugReviewAgent', () => {
     // If the bash shim was used on Windows, Jest would fail silently and the
     // agent would fall back to the injected-context path (which has no context
     // here) and return testFailure: 'none'.  We verify the live path ran.
-    const result = await runDebugReviewAgent(makeTask('live jest run'));
+    const result = await runDebugReview(makeTask('live jest run'));
 
     // The ecommerce-demo has 1 intentional failure — agent detects it
     expect(result.failureReport!.testFailure).not.toBe('none');

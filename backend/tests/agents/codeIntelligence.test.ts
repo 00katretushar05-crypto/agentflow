@@ -7,7 +7,8 @@
  * the agent just does file-system reads and regex analysis.
  */
 
-import { runCodeIntelligenceAgent } from '../../src/agents/codeIntelligence';
+import { runCodeIntelligence } from '../../src/agents/codeIntelligence.js';
+import { describe, test, expect } from 'vitest';
 import type { AgentTask } from '../../src/types/contracts';
 
 // Minimal valid task factory
@@ -21,13 +22,13 @@ function makeTask(goal: string, overrides: Partial<AgentTask> = {}): AgentTask {
   };
 }
 
-describe('runCodeIntelligenceAgent', () => {
+describe('runCodeIntelligence', () => {
   // -------------------------------------------------------------------------
   // Shape & contract
   // -------------------------------------------------------------------------
 
   test('returns a valid AgentResult with all required fields', async () => {
-    const result = await runCodeIntelligenceAgent(makeTask('fix discount bug'));
+    const result = await runCodeIntelligence(makeTask('fix discount bug'));
 
     expect(result.agent).toBe('CODE_INTELLIGENCE');
     expect(['SUCCESS', 'FAILURE', 'PARTIAL']).toContain(result.status);
@@ -44,7 +45,7 @@ describe('runCodeIntelligenceAgent', () => {
   });
 
   test('populates findings with required fields', async () => {
-    const result = await runCodeIntelligenceAgent(makeTask('fix discount bug'));
+    const result = await runCodeIntelligence(makeTask('fix discount bug'));
 
     expect(result.findings).toBeDefined();
     const f = result.findings!;
@@ -56,7 +57,7 @@ describe('runCodeIntelligenceAgent', () => {
   });
 
   test('filesModified is empty (agent is read-only)', async () => {
-    const result = await runCodeIntelligenceAgent(makeTask('checkout premium discount'));
+    const result = await runCodeIntelligence(makeTask('checkout premium discount'));
     expect(result.filesModified).toEqual([]);
   });
 
@@ -65,7 +66,7 @@ describe('runCodeIntelligenceAgent', () => {
   // -------------------------------------------------------------------------
 
   test('examines all four ecommerce-demo source files', async () => {
-    const result = await runCodeIntelligenceAgent(makeTask('improve discount logic'));
+    const result = await runCodeIntelligence(makeTask('improve discount logic'));
 
     const examined = result.filesExamined;
     expect(examined.some(f => f.includes('checkout.js'))).toBe(true);
@@ -75,7 +76,7 @@ describe('runCodeIntelligenceAgent', () => {
   });
 
   test('extracts real function names from source files', async () => {
-    const result = await runCodeIntelligenceAgent(makeTask('discount premium customer'));
+    const result = await runCodeIntelligence(makeTask('discount premium customer'));
 
     const fns = result.findings!.affectedFunctions;
     // These functions exist in the actual ecommerce-demo source
@@ -88,7 +89,7 @@ describe('runCodeIntelligenceAgent', () => {
   // -------------------------------------------------------------------------
 
   test('identifies checkout + discount files as relevant for discount-related goal', async () => {
-    const result = await runCodeIntelligenceAgent(
+    const result = await runCodeIntelligence(
       makeTask('fix the premium customer discount calculation'),
     );
 
@@ -98,7 +99,7 @@ describe('runCodeIntelligenceAgent', () => {
   });
 
   test('falls back to all files when goal has no matching keywords', async () => {
-    const result = await runCodeIntelligenceAgent(makeTask('xyzzy'));
+    const result = await runCodeIntelligence(makeTask('xyzzy'));
 
     // Fallback: all scanned files become affected files
     expect(result.findings!.affectedFiles.length).toBeGreaterThanOrEqual(4);
@@ -109,7 +110,7 @@ describe('runCodeIntelligenceAgent', () => {
   // -------------------------------------------------------------------------
 
   test('risk level is HIGH or MEDIUM for a cross-module task', async () => {
-    const result = await runCodeIntelligenceAgent(
+    const result = await runCodeIntelligence(
       makeTask('fix checkout discount for premium users'),
     );
 
@@ -119,7 +120,7 @@ describe('runCodeIntelligenceAgent', () => {
 
   test('task fields are echoed back unchanged in result', async () => {
     const task = makeTask('some goal', { taskId: 'echo-test', context: { key: 'val' } });
-    const result = await runCodeIntelligenceAgent(task);
+    const result = await runCodeIntelligence(task);
 
     expect(result.task.taskId).toBe('echo-test');
     expect(result.task.goal).toBe('some goal');
@@ -127,7 +128,7 @@ describe('runCodeIntelligenceAgent', () => {
   });
 
   test('recommendedNextAction mentions TEST_QA or next step', async () => {
-    const result = await runCodeIntelligenceAgent(makeTask('discount bug'));
+    const result = await runCodeIntelligence(makeTask('discount bug'));
     expect(result.recommendedNextAction.toLowerCase()).toMatch(/test|qa|proceed/i);
   });
 });
