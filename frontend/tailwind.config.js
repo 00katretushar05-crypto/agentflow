@@ -52,6 +52,20 @@ export default {
         md: "calc(var(--radius) - 2px)",
         sm: "calc(var(--radius) - 4px)",
       },
+      keyframes: {
+        sweep: {
+          "0%":   { transform: "translateX(-100%)" },
+          "100%": { transform: "translateX(200%)" },
+        },
+        burst: {
+          "0%":   { transform: "scale(1)",    opacity: "0.7" },
+          "100%": { transform: "scale(1.8)",  opacity: "0" },
+        },
+      },
+      animation: {
+        sweep: "sweep 0.7s ease-in-out forwards",
+        burst: "burst 0.6s ease-out forwards",
+      },
     },
   },
   plugins: [require("tailwindcss-animate")],

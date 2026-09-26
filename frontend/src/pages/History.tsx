@@ -1,31 +1,51 @@
 import { useNavigate } from "react-router-dom";
 import {
   Clock,
-  FileCode2,
-  FlaskConical,
   ChevronRight,
   Search,
 } from "lucide-react";
 import { StatusBadge } from "@/components/StatusBadge";
-import { RiskGauge } from "@/components/RiskGauge";
-import { TASKS } from "@/data/demo";
+import { MOCK_TASKS } from "@/data/demo";
+import type { SupervisorState } from "@/data/demo";
 import { useState } from "react";
+
+const STATUS_FILTERS: Array<"ALL" | SupervisorState> = [
+  "ALL",
+  "VERIFIED",
+  "FAILED",
+  "TESTING",
+  "IMPLEMENTING",
+];
 
 export function History() {
   const navigate = useNavigate();
   const [filter, setFilter] = useState<string>("ALL");
 
-  const STATUS_FILTERS = ["ALL", "VERIFIED", "RECOVERED", "FAILED", "IN_PROGRESS"];
+  const tasks = MOCK_TASKS.tasks;
 
   const filtered =
-    filter === "ALL" ? TASKS : TASKS.filter((t) => t.status === filter);
+    filter === "ALL" ? tasks : tasks.filter((t) => t.status === filter);
 
   const counts = {
-    VERIFIED: TASKS.filter((t) => t.status === "VERIFIED").length,
-    RECOVERED: TASKS.filter((t) => t.status === "RECOVERED").length,
-    FAILED: TASKS.filter((t) => t.status === "FAILED").length,
-    IN_PROGRESS: TASKS.filter((t) => t.status === "IN_PROGRESS").length,
+    VERIFIED: tasks.filter((t) => t.status === "VERIFIED").length,
+    FAILED: tasks.filter((t) => t.status === "FAILED").length,
+    TESTING: tasks.filter(
+      (t) => t.status === "TESTING" || t.status === "RETESTING"
+    ).length,
+    IMPLEMENTING: tasks.filter(
+      (t) => t.status === "IMPLEMENTING" || t.status === "ANALYZING" || t.status === "PLANNING"
+    ).length,
   };
+
+  function formatRelativeTime(iso: string) {
+    const diff = Date.now() - new Date(iso).getTime();
+    const mins = Math.floor(diff / 60_000);
+    if (mins < 1) return "just now";
+    if (mins < 60) return `${mins}m ago`;
+    const hrs = Math.floor(mins / 60);
+    if (hrs < 24) return `${hrs}h ago`;
+    return `${Math.floor(hrs / 24)}d ago`;
+  }
 
   return (
     <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
@@ -34,7 +54,7 @@ export function History() {
         <div>
           <h1 className="text-xl font-bold text-white/90">Task History</h1>
           <p className="text-[13px] text-white/35 mt-1">
-            {TASKS.length} tasks total · {counts.VERIFIED} verified · {counts.FAILED} failed
+            {tasks.length} tasks total · {counts.VERIFIED} verified · {counts.FAILED} failed
           </p>
         </div>
       </div>
@@ -42,10 +62,10 @@ export function History() {
       {/* Summary Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
         {[
-          { label: "Verified", count: counts.VERIFIED, color: "text-emerald-400", bg: "bg-emerald-500/10" },
-          { label: "Recovered", count: counts.RECOVERED, color: "text-amber-400", bg: "bg-amber-500/10" },
-          { label: "Failed", count: counts.FAILED, color: "text-red-400", bg: "bg-red-500/10" },
-          { label: "In Progress", count: counts.IN_PROGRESS, color: "text-indigo-400", bg: "bg-indigo-500/10" },
+          { label: "Verified",     count: counts.VERIFIED,     color: "text-emerald-400", bg: "bg-emerald-500/10" },
+          { label: "Testing",      count: counts.TESTING,      color: "text-amber-400",   bg: "bg-amber-500/10" },
+          { label: "Failed",       count: counts.FAILED,       color: "text-red-400",     bg: "bg-red-500/10" },
+          { label: "Implementing", count: counts.IMPLEMENTING, color: "text-indigo-400",  bg: "bg-indigo-500/10" },
         ].map((s) => (
           <div
             key={s.label}
@@ -85,43 +105,29 @@ export function History() {
         <div className="divide-y divide-white/[0.04]">
           {filtered.map((task) => (
             <div
-              key={task.id}
+              key={task.taskId}
               className="group flex items-start gap-4 px-5 py-4 hover:bg-white/[0.02] transition-colors cursor-pointer"
-              onClick={() => navigate(`/mission/${task.id}`)}
+              onClick={() => navigate(`/mission/${task.taskId}`)}
             >
-              {/* Status indicator */}
-              <div className="mt-0.5">
-                <RiskGauge level={task.riskLevel} showLabel={false} />
+              {/* Status badge */}
+              <div className="mt-0.5 shrink-0">
+                <StatusBadge variant={task.status} dot />
               </div>
 
               {/* Main content */}
               <div className="flex-1 min-w-0 space-y-1.5">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <p className="text-[14px] font-semibold text-white/85 group-hover:text-white transition-colors">
-                    {task.title}
-                  </p>
-                  <StatusBadge variant={task.status} dot />
-                </div>
-                <p className="text-[12px] text-white/35 truncate">{task.description}</p>
+                <p className="text-[14px] font-semibold text-white/85 group-hover:text-white transition-colors truncate">
+                  {task.goal}
+                </p>
 
                 {/* Meta */}
-                <div className="flex items-center gap-4 pt-1 flex-wrap">
+                <div className="flex items-center gap-4 pt-0.5 flex-wrap">
                   <div className="flex items-center gap-1.5 text-[11px] text-white/25">
                     <Clock className="w-3 h-3" />
-                    <span>{task.duration ?? "In progress"}</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[11px] text-white/25">
-                    <FileCode2 className="w-3 h-3" />
-                    <span>{task.filesChanged} files</span>
-                  </div>
-                  <div className="flex items-center gap-1.5 text-[11px] text-white/25">
-                    <FlaskConical className="w-3 h-3" />
-                    <span>
-                      {task.testsPassed}/{task.testsRun} tests
-                    </span>
+                    <span>Updated {formatRelativeTime(task.updatedAt)}</span>
                   </div>
                   <span className="text-[11px] text-white/20 font-mono ml-auto hidden sm:block">
-                    {task.id}
+                    {task.taskId}
                   </span>
                 </div>
               </div>

@@ -3,15 +3,25 @@ import { ArrowLeft, ChevronRight, Shield } from "lucide-react";
 import { EvidenceLedger } from "@/components/EvidenceLedger";
 import { StatusBadge } from "@/components/StatusBadge";
 import { RiskGauge } from "@/components/RiskGauge";
-import { EVIDENCE_ITEMS, TASKS } from "@/data/demo";
+import { MOCK_EVIDENCE, MOCK_TASK, MOCK_TASKS } from "@/data/demo";
 
 export function Evidence() {
   const { taskId } = useParams();
   const navigate = useNavigate();
-  const task = TASKS.find((t) => t.id === taskId) ?? TASKS[0];
 
-  const passed = EVIDENCE_ITEMS.filter((e) => e.status === "PASS").length;
-  const total = EVIDENCE_ITEMS.length;
+  // Task summary for header (goal + status)
+  const taskSummary =
+    MOCK_TASKS.tasks.find((t) => t.taskId === taskId) ?? MOCK_TASKS.tasks[0];
+
+  // Evidence response — when real API is wired, swap for GET /api/task/:id/evidence
+  const evidence = MOCK_EVIDENCE;
+
+  const passed = evidence.items.filter((e) => e.status === "PASS").length;
+  const total = evidence.items.length;
+
+  // Derive stats from MOCK_TASK's CODE_INTELLIGENCE result when available
+  const ciResult = MOCK_TASK.agentResults["CODE_INTELLIGENCE"];
+  const filesChanged = ciResult?.findings.affectedFiles.length ?? 0;
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-8 space-y-8">
@@ -30,12 +40,11 @@ export function Evidence() {
             <div className="flex items-center gap-2 text-[11px] text-white/30 mb-2">
               <span>Evidence Ledger</span>
               <ChevronRight className="w-3 h-3" />
-              <span className="font-mono text-white/50">{task.id}</span>
+              <span className="font-mono text-white/50">{evidence.taskId}</span>
             </div>
-            <h1 className="text-xl font-bold text-white/90">{task.title}</h1>
-            <p className="text-[13px] text-white/40 mt-1">{task.description}</p>
+            <h1 className="text-xl font-bold text-white/90">{taskSummary.goal}</h1>
           </div>
-          <StatusBadge variant={task.status} dot />
+          <StatusBadge variant={taskSummary.status} dot />
         </div>
       </div>
 
@@ -69,16 +78,16 @@ export function Evidence() {
             </div>
           </div>
 
-          <RiskGauge level={task.riskLevel} showLabel />
+          <RiskGauge level={MOCK_TASK.risk ?? "MEDIUM"} showLabel />
         </div>
       </div>
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-3">
         {[
-          { label: "Files Changed", value: task.filesChanged },
-          { label: "Tests Run", value: task.testsRun },
-          { label: "Tests Passed", value: task.testsPassed },
+          { label: "Files Changed", value: filesChanged > 0 ? filesChanged : "—" },
+          { label: "Tests Run", value: "—" },
+          { label: "Tests Passed", value: "—" },
         ].map((s) => (
           <div
             key={s.label}
@@ -95,11 +104,11 @@ export function Evidence() {
         <h2 className="text-[10px] tracking-widest text-white/25 uppercase font-semibold mb-4">
           Verification Checklist
         </h2>
-        <EvidenceLedger items={EVIDENCE_ITEMS} />
+        <EvidenceLedger items={evidence.items} />
       </div>
 
-      {/* Approve Button */}
-      {task.status !== "VERIFIED" && (
+      {/* Approve Button — only when no tests are still pending/in-progress */}
+      {taskSummary.status !== "VERIFIED" && (
         <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-5">
           <p className="text-[12px] text-white/50 mb-3">
             All automated checks have passed. Human approval required before merge.

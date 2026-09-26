@@ -43,7 +43,7 @@ export function CommandCenter() {
     e.preventDefault();
     if (!task.trim()) return;
     setLoading(true);
-    setTimeout(() => navigate("/mission/task-001"), 800);
+    setTimeout(() => navigate("/mission/AF-1024"), 800);
   }
 
   return (
