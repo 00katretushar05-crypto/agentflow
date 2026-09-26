@@ -1,0 +1,106 @@
+/**
+ * Shared contracts for AgentFlow. All Supervisor <-> Agent <-> API
+ * communication must use these types. Do not duplicate or fork these
+ * shapes elsewhere in the codebase.
+ */
+
+export type AgentName = 'CODE_INTELLIGENCE' | 'TEST_QA' | 'DEBUG_REVIEW';
+
+export type SupervisorState =
+  | 'RECEIVED' | 'PLANNING' | 'ANALYZING' | 'IMPLEMENTING'
+  | 'TESTING' | 'FAILED' | 'RECOVERING' | 'RETESTING'
+  | 'VERIFYING' | 'AWAITING_APPROVAL' | 'VERIFIED';
+
+/** A single unit of work handed to a specialized agent. */
+export interface AgentTask {
+  taskId: string;
+  agent: AgentName;
+  goal: string;
+  context?: Record<string, unknown>;
+  /** ISO timestamp when this task was assigned. */
+  assignedAt: string;
+}
+
+export interface Finding {
+  affectedFiles: string[];
+  affectedFunctions: string[];
+  riskLevel: 'LOW' | 'MEDIUM' | 'HIGH';
+  recommendation: string;
+}
+
+export interface TestResult {
+  totalTests: number;
+  passed: number;
+  failed: number;
+  failures: { testName: string; expected: string; received: string }[];
+  /** ISO timestamp when this test run finished. */
+  executedAt: string;
+}
+
+export interface FailureReport {
+  testFailure: string;
+  stackTrace: string;
+  relevantCode: string;
+  rootCause: string;
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+}
+
+export interface VerificationResult {
+  requirementsMet: boolean;
+  testsExecuted: number;
+  testsPassed: number;
+  regressionPassed: boolean;
+  codeReviewed: boolean;
+}
+
+export interface AgentResult {
+  agent: AgentName;
+  status: 'SUCCESS' | 'FAILURE' | 'PARTIAL';
+  task: AgentTask;
+  findings?: Finding;
+  testResult?: TestResult;
+  failureReport?: FailureReport;
+  filesExamined: string[];
+  filesModified: string[];
+  confidence: 'LOW' | 'MEDIUM' | 'HIGH';
+  recommendedNextAction: string;
+  /** ISO timestamp when this result was produced. */
+  completedAt: string;
+}
+
+/** A single entry in the Supervisor's state transition history — this IS your audit trail / evidence ledger backbone. */
+export interface StateTransition {
+  from: SupervisorState;
+  to: SupervisorState;
+  reason: string;
+  timestamp: string;
+}
+
+/** Full Supervisor state for one task — this is what GET /api/task/:id returns. */
+export interface SupervisorTaskState {
+  taskId: string;
+  goal: string;
+  status: SupervisorState;
+  history: StateTransition[];
+  agentResults: Partial<Record<AgentName, AgentResult>>;
+  retryCount: number;
+  /** Hard cap enforced by the Supervisor — prevents infinite retry loops in a live demo. */
+  maxRetries: number;
+  verification?: VerificationResult;
+  risk?: {
+    filesAffected: number;
+    functionsAffected: number;
+    testsRun: number;
+    score: number;
+    recommendation: string;
+  };
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Standard error shape for every API error response — keeps error handling consistent across all routes. */
+export interface ApiError {
+  error: string;
+  code: 'NOT_FOUND' | 'INVALID_REQUEST' | 'INTERNAL_ERROR' | 'MAX_RETRIES_EXCEEDED';
+  taskId?: string;
+}
