@@ -5,7 +5,7 @@
  * files can import and wrap it with supertest without binding a real port.
  * The actual `listen()` call lives in index.ts.
  */
-
+import cors from 'cors';
 import express from 'express';
 import { apiRouter } from './routes/api.js';
 
@@ -15,6 +15,7 @@ import { apiRouter } from './routes/api.js';
  */
 export function createApp(): express.Application {
   const app = express();
+  app.use(cors());
 
   // Parse JSON request bodies.
   app.use(express.json());
