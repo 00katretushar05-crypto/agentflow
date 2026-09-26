@@ -1,24 +1,36 @@
 {
   "name": "agentflow-backend",
-  "version": "1.0.0",
+  "version": "0.1.0",
+  "description": "AgentFlow Supervisor Engine — backend",
   "private": true,
+  "type": "module",
+  "main": "dist/index.js",
   "scripts": {
-    "test": "jest --runInBand --forceExit",
-    "typecheck": "tsc --noEmit"
+    "dev": "tsx watch src/index.ts",
+    "build": "tsc --project tsconfig.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:integration": "vitest run tests/integration"
+  },
+  "dependencies": {
+    "cors": "^2.8.6",
+    "express": "^5.2.1",
+    "uuid": "^9.0.1"
   },
   "devDependencies": {
-    "@types/jest": "^29.5.13",
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/jest": "^29.5.12",
     "@types/node": "^22.14.1",
+    "@types/supertest": "^7.2.1",
+    "@types/uuid": "^9.0.8",
     "jest": "^29.7.0",
-    "ts-jest": "^29.3.2",
-    "typescript": "^5.7.3"
-  },
-  "jest": {
-    "preset": "ts-jest",
-    "testEnvironment": "node",
-    "roots": ["<rootDir>/tests"],
-    "moduleNameMapper": {
-      "^(\\.{1,2}/.*)\\.js$": "$1"
-    }
+    "supertest": "^7.3.0",
+    "ts-jest": "^29.1.4",
+    "ts-node": "^10.9.2",
+    "tsx": "^4.23.15",
+    "typescript": "^5.7.3",
+    "vitest": "^1.6.0"
   }
 }

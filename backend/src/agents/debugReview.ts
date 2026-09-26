@@ -15,7 +15,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import type { AgentTask, AgentResult, FailureReport } from '../types/contracts';
+import { fileURLToPath } from 'node:url';
+import type { AgentTask, AgentResult, FailureReport } from '../types/contracts.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo');
 
@@ -31,7 +35,6 @@ interface JestAssertionResult {
 
 interface JestTestSuiteResult {
   testFilePath: string;
-  /** Jest uses "assertionResults" in --json output (not "testResults") */
   assertionResults: JestAssertionResult[];
 }
 
@@ -41,8 +44,6 @@ interface JestJsonOutput {
 }
 
 function runJest(): string {
-  // Use node + jest.js directly so this works on Windows (the .bin/jest shim is
-  // a bash script and will fail on Windows with a SyntaxError).
   const jestEntry = path.join(REPO_ROOT, 'node_modules', 'jest', 'bin', 'jest.js');
   const cmd = `node "${jestEntry}" --json --no-coverage`;
   try {
@@ -64,21 +65,12 @@ function runJest(): string {
 // Stack trace parsing
 // ---------------------------------------------------------------------------
 
-/**
- * Extract the first meaningful source file reference from a Jest failure message.
- * Jest frames look like:
- *   at Object.<anonymous> (src/discounts/discountService.test.js:42:5)
- *   at /abs/path/to/file.js:10:3
- */
 function parseStackFrame(failureMessage: string): { file: string; line: number } | null {
-  // Look for project-relative paths (not node_modules, not Jest internals)
   const frameRe = /\(([^)]+\.(?:js|ts)):(\d+):\d+\)/g;
   for (const m of failureMessage.matchAll(frameRe)) {
     const rawPath = m[1]!;
     const lineNo = parseInt(m[2]!, 10);
-    // Skip node_modules and jest internal paths
     if (rawPath.includes('node_modules')) continue;
-    // If absolute, make relative to REPO_ROOT; if relative use as-is
     const abs = path.isAbsolute(rawPath) ? rawPath : path.join(REPO_ROOT, rawPath);
     if (fs.existsSync(abs)) {
       return { file: abs, line: lineNo };
@@ -87,9 +79,6 @@ function parseStackFrame(failureMessage: string): { file: string; line: number }
   return null;
 }
 
-/**
- * Read a window of ±CONTEXT_LINES around `targetLine` in a source file.
- */
 function readCodeWindow(absFile: string, targetLine: number, contextLines = 5): string {
   const lines = fs.readFileSync(absFile, 'utf-8').split('\n');
   const start = Math.max(0, targetLine - contextLines - 1);
@@ -104,16 +93,11 @@ function readCodeWindow(absFile: string, targetLine: number, contextLines = 5): 
 // Root-cause heuristics for the ecommerce-demo bug
 // ---------------------------------------------------------------------------
 
-/**
- * Identify root cause by cross-referencing source files involved in the failure.
- * Returns { rootCause, minimalFix, confidence }.
- */
 function analyzeRootCause(
   failingTestName: string,
   stackTrace: string,
   relevantCode: string,
 ): { rootCause: string; minimalFix: string; confidence: FailureReport['confidence'] } {
-  // Known bug: field-name mismatch in checkout.js — detected by inspecting actual source
   const checkoutSrc = path.join(REPO_ROOT, 'src', 'checkout', 'checkout.js');
   const discountSrc = path.join(REPO_ROOT, 'src', 'discounts', 'discountService.js');
 
@@ -121,7 +105,6 @@ function analyzeRootCause(
     const checkoutCode = fs.readFileSync(checkoutSrc, 'utf-8');
     const discountCode = fs.readFileSync(discountSrc, 'utf-8');
 
-    // Detect the field-name mismatch
     const callerPassesType = /getDiscount\(\{[^}]*type\s*:/s.test(checkoutCode);
     const serviceChecksMembers = /customer\.membership/.test(discountCode);
 
@@ -143,7 +126,6 @@ function analyzeRootCause(
     }
   }
 
-  // Generic fallback for other failures
   const isAssertionError =
     /Expected.*Received/s.test(stackTrace) || /AssertionError/i.test(stackTrace);
 
@@ -225,15 +207,11 @@ function applyFix(minimalFix: string): string | null {
 // Public agent entry-point
 // ---------------------------------------------------------------------------
 
-export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult> {
-  // Accept optional pre-supplied failure evidence from the task context.
-  // task.context.failureReport may be set by TEST_QA to avoid running Jest twice.
+export async function runDebugReview(task: AgentTask): Promise<AgentResult> {
   const injectedReport = task.context?.['failureReport'] as FailureReport | undefined;
   const injectedStackTrace = (task.context?.['stackTrace'] as string | undefined) ?? '';
   const injectedTestName = (task.context?.['failingTest'] as string | undefined) ?? '';
 
-  // If the caller injected a full FailureReport, use it directly — no need to
-  // spawn Jest again.  We still open the key source files to verify the fix.
   if (injectedReport) {
     const filesExamined: string[] = [];
     const keyFiles = [
@@ -245,8 +223,6 @@ export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult>
       if (fs.existsSync(kf) && !filesExamined.includes(rel)) filesExamined.push(rel);
     }
 
-    // Re-run root cause analysis using the injected report's stack trace so we
-    // get the real relevantCode window even when the caller already parsed it.
     const frame = parseStackFrame(injectedReport.stackTrace);
     let relevantCode = injectedReport.relevantCode || '';
     if (frame && !relevantCode) {
@@ -298,7 +274,6 @@ export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult>
   const filesExamined: string[] = [];
 
   if (jestOutput && jestOutput.numFailedTests > 0) {
-    // Find the first failing test assertion
     for (const suite of jestOutput.testResults) {
       for (const assertion of (suite.assertionResults ?? [])) {
         if (assertion.status !== 'failed') continue;
@@ -306,7 +281,6 @@ export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult>
         const testName = assertion.fullName;
         const rawStack = assertion.failureMessages.join('\n');
 
-        // Parse stack to find source location
         const frame = parseStackFrame(rawStack);
         let relevantCode = '';
 
@@ -316,7 +290,6 @@ export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult>
           relevantCode = readCodeWindow(frame.file, frame.line);
         }
 
-        // Always include checkout + discount source in examination
         const keyFiles = [
           path.join(REPO_ROOT, 'src', 'checkout', 'checkout.js'),
           path.join(REPO_ROOT, 'src', 'discounts', 'discountService.js'),
@@ -361,7 +334,6 @@ export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult>
     }
   }
 
-  // --- Fallback: no live Jest output — use injected context if provided ---
   if (injectedStackTrace || injectedTestName) {
     const frame = parseStackFrame(injectedStackTrace);
     let relevantCode = '';
@@ -402,7 +374,6 @@ export async function runDebugReviewAgent(task: AgentTask): Promise<AgentResult>
     };
   }
 
-  // --- No failures found ---
   return {
     agent: 'DEBUG_REVIEW',
     status: 'SUCCESS',

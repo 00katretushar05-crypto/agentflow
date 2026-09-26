@@ -4,25 +4,23 @@
  * TEST_QA agent — inspects ecommerce-demo/tests/, identifies relevant and
  * missing tests for the task goal, then executes the Jest suite and captures
  * structured pass/fail results.
- *
- * Steps:
- *   1. Scan tests/ for existing test files
- *   2. Identify which tests are relevant to the goal (keyword match)
- *   3. Run Jest (child_process) and parse JSON output into TestResult
- *   4. Detect missing test coverage areas
- *   5. Return AgentResult with populated testResult
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import type { AgentTask, AgentResult, TestResult } from '../types/contracts';
+import { fileURLToPath } from 'node:url';
+import type { AgentTask, AgentResult, TestResult } from '../types/contracts.js';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo');
 
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
+
 
 /**
  * Collect all .js/.ts source files under `dir` whose path contains `stem`
@@ -49,6 +47,7 @@ function walkSrcForStem(dir: string, stem: string): string[] {
 }
 
 /** Collect all .test.js files under `dir`. */
+
 function collectTestFiles(dir: string): string[] {
   const results: string[] = [];
   if (!fs.existsSync(dir)) return results;
@@ -64,22 +63,17 @@ function collectTestFiles(dir: string): string[] {
   return results;
 }
 
-/** Score relevance of a file to the task goal (same heuristic as codeIntelligence). */
 function relevanceScore(source: string, goal: string): number {
   const goalWords = goal.toLowerCase().split(/\W+/).filter(w => w.length > 3);
   const lowerSource = source.toLowerCase();
   return goalWords.reduce((acc, word) => acc + (lowerSource.includes(word) ? 1 : 0), 0);
 }
 
-/** Run Jest in the ecommerce-demo directory, returning raw JSON output. */
 function runJest(): string {
-  // Use node + jest.js directly so this works on Windows (the .bin/jest shim is
-  // a bash script and will fail on Windows with a SyntaxError).
   const jestEntry = path.join(REPO_ROOT, 'node_modules', 'jest', 'bin', 'jest.js');
   const cmd = `node "${jestEntry}" --json --no-coverage`;
 
   try {
-    // Jest exits non-zero on test failures; we still want the stdout JSON
     return execSync(cmd, {
       cwd: REPO_ROOT,
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -87,7 +81,6 @@ function runJest(): string {
       timeout: 30_000,
     });
   } catch (err: unknown) {
-    // execSync throws on non-zero exit; stdout is on err.stdout
     if (err && typeof err === 'object' && 'stdout' in err) {
       return (err as { stdout: string }).stdout ?? '';
     }
@@ -95,9 +88,6 @@ function runJest(): string {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Jest JSON result shape (subset we need)
-// ---------------------------------------------------------------------------
 interface JestAssertionResult {
   title: string;
   fullName: string;
@@ -106,9 +96,13 @@ interface JestAssertionResult {
 }
 
 interface JestTestSuiteResult {
+
+  testFilePath: string;
+
   /** Absolute path to the test file — Jest uses "name" in its --json output. */
   name: string;
   /** Jest uses "assertionResults" in --json output (not "testResults") */
+
   assertionResults: JestAssertionResult[];
 }
 
@@ -124,7 +118,7 @@ interface JestJsonOutput {
 // Public agent entry-point
 // ---------------------------------------------------------------------------
 
-export async function runTestQAAgent(task: AgentTask): Promise<AgentResult> {
+export async function runTestQA(task: AgentTask): Promise<AgentResult> {
   const testsDir = path.join(REPO_ROOT, 'tests');
   const allTestFiles = collectTestFiles(testsDir);
 
@@ -132,13 +126,11 @@ export async function runTestQAAgent(task: AgentTask): Promise<AgentResult> {
     path.relative(REPO_ROOT, f).replace(/\\/g, '/'),
   );
 
-  // Identify relevant test files for the goal
   const relevantFiles = allTestFiles.filter(absPath => {
     const source = fs.readFileSync(absPath, 'utf-8');
     return relevanceScore(source, task.goal) > 0;
   });
 
-  // Run Jest and parse results
   const raw = runJest();
 
   let jestOutput: JestJsonOutput | null = null;
@@ -168,7 +160,6 @@ export async function runTestQAAgent(task: AgentTask): Promise<AgentResult> {
       executedAt: new Date().toISOString(),
     };
   } else {
-    // Jest not runnable — report what we found statically
     testResult = {
       totalTests: 0,
       passed: 0,
@@ -178,7 +169,6 @@ export async function runTestQAAgent(task: AgentTask): Promise<AgentResult> {
     };
   }
 
-  // Identify missing coverage areas
   const srcDir = path.join(REPO_ROOT, 'src');
   const testedModules = new Set(
     allTestFiles.map(f => path.basename(f).replace(/\.test\.[jt]s$/, '')),
@@ -253,10 +243,6 @@ export async function runTestQAAgent(task: AgentTask): Promise<AgentResult> {
     completedAt: new Date().toISOString(),
   };
 }
-
-// ---------------------------------------------------------------------------
-// Parse Jest failure message for expected/received values
-// ---------------------------------------------------------------------------
 
 function extractExpected(msg: string): string {
   const m = msg.match(/Expected[^:]*:\s*(.+)/);

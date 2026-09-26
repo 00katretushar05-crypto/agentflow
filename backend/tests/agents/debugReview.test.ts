@@ -16,7 +16,8 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import { execSync } from 'child_process';
-import { runDebugReviewAgent } from '../../src/agents/debugReview';
+import { runDebugReview } from '../../src/agents/debugReview.js';
+import { describe, test, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import type { AgentTask, FailureReport } from '../../src/types/contracts';
 
 // ---------------------------------------------------------------------------
@@ -31,8 +32,53 @@ const ECOMMERCE_ROOT = path.resolve(
   __dirname, '..', '..', '..', 'ecommerce-demo',
 );
 
-/** Original (buggy) content, captured once when the module loads. */
-const ORIGINAL_CHECKOUT = fs.readFileSync(CHECKOUT_JS, 'utf-8');
+/** Original (buggy) content — hardcoded to guarantee it is always the buggy version
+ *  regardless of the checkout.js state on disk at module-load time.
+ */
+const ORIGINAL_CHECKOUT = `/**
+ * checkout.js
+ * Handles the checkout flow: looks up the customer, applies a discount,
+ * and delegates order creation to orderService.
+ *
+ * ⚠️  INTENTIONAL DEMO BUG — hackathon target
+ *     Line marked [BUG] below passes \`customer.type\` to discountService,
+ *     but discountService.getDiscount() expects \`customer.membership\`.
+ *     Because the field names differ, premium customers receive 0 % discount
+ *     instead of the required 10 % (see requirements.md).
+ *
+ *     Fix: change \`type: customer.type\` → \`membership: customer.type\`
+ *     (or align the field name used across both modules).
+ */
+
+const { getDiscount } = require('../discounts/discountService');
+const { createOrder } = require('../orders/orderService');
+const { getUserById } = require('../users/userService');
+
+/**
+ * Processes checkout for a user.
+ * @param {string} userId
+ * @param {Array<{ id: string, price: number }>} items
+ * @returns {{ orderId: string, total: number, discount: number }}
+ */
+function checkout(userId, items) {
+  const customer = getUserById(userId);
+
+  const subtotal = items.reduce((sum, item) => sum + item.price, 0);
+
+  // [BUG] Should be { membership: customer.type } so discountService can
+  //       detect premium status.  Using \`type\` means membership is undefined
+  //       inside getDiscount(), so the 10 % branch is never reached.
+  const discountRate = getDiscount({ type: customer.type }); // ← INTENTIONAL BUG
+
+  const discount = subtotal * discountRate;
+  const total = subtotal - discount;
+
+  const order = createOrder({ userId, items, total, discount });
+
+  return { orderId: order.id, total, discount };
+}
+
+module.exports = { checkout };`;
 
 function makeTask(goal: string, context?: Record<string, unknown>): AgentTask {
   return {
@@ -57,25 +103,25 @@ function restoreCheckout(): void {
 // (and testQA tests) to see a passing suite instead of the intentional failure.
 // ---------------------------------------------------------------------------
 
-beforeEach(() => {
-  restoreCheckout();
-});
+describe('runDebugReview', () => {
+  beforeEach(() => {
+    restoreCheckout();
+  });
 
-afterEach(() => {
-  restoreCheckout();
-});
+  afterEach(() => {
+    restoreCheckout();
+  });
 
-afterAll(() => {
-  restoreCheckout();
-});
+  afterAll(() => {
+    restoreCheckout();
+  });
 
-// ---------------------------------------------------------------------------
-// Shape & contract
-// ---------------------------------------------------------------------------
+  // -------------------------------------------------------------------------
+  // Shape & contract
+  // -------------------------------------------------------------------------
 
-describe('runDebugReviewAgent', () => {
   test('returns a valid AgentResult with all required fields', async () => {
-    const result = await runDebugReviewAgent(makeTask('investigate failing tests'));
+    const result = await runDebugReview(makeTask('investigate failing tests'));
 
     expect(result.agent).toBe('DEBUG_REVIEW');
     expect(['SUCCESS', 'FAILURE', 'PARTIAL']).toContain(result.status);
@@ -90,7 +136,7 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('populates failureReport with required fields', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount failure'));
+    const result = await runDebugReview(makeTask('debug discount failure'));
 
     expect(result.failureReport).toBeDefined();
     const fr = result.failureReport!;
@@ -103,17 +149,16 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('filesModified contains checkout.js when the known bug is present', async () => {
-    // Ensure the bug is present before running
     restoreCheckout();
 
-    const result = await runDebugReviewAgent(makeTask('debug tests'));
+    const result = await runDebugReview(makeTask('debug tests'));
     expect(result.filesModified.length).toBeGreaterThan(0);
     expect(result.filesModified.some(f => f.includes('checkout.js'))).toBe(true);
   });
 
   test('task fields are echoed back unchanged', async () => {
     const task = makeTask('some goal', { traceId: 'abc' });
-    const result = await runDebugReviewAgent(task);
+    const result = await runDebugReview(task);
 
     expect(result.task.taskId).toBe('test-dbg-001');
     expect(result.task.goal).toBe('some goal');
@@ -125,39 +170,37 @@ describe('runDebugReviewAgent', () => {
   // -------------------------------------------------------------------------
 
   test('detects the intentional premium discount failure', async () => {
-    const result = await runDebugReviewAgent(makeTask('why does premium discount fail'));
+    const result = await runDebugReview(makeTask('why does premium discount fail'));
     const fr = result.failureReport!;
 
-    // There is a live failing test in ecommerce-demo
     expect(fr.testFailure).not.toBe('none');
     expect(fr.testFailure.toLowerCase()).toMatch(/premium/i);
   });
 
   test('root cause identifies the field-name mismatch with HIGH confidence', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount regression'));
+    const result = await runDebugReview(makeTask('debug discount regression'));
     const fr = result.failureReport!;
 
-    // The agent reads checkout.js + discountService.js and detects the mismatch
     expect(fr.confidence).toBe('HIGH');
     expect(fr.rootCause.toLowerCase()).toMatch(/field.?name|membership|type/i);
   });
 
   test('rootCause includes a proposed minimal fix', async () => {
-    const result = await runDebugReviewAgent(makeTask('fix premium customer discount'));
+    const result = await runDebugReview(makeTask('fix premium customer discount'));
     const fr = result.failureReport!;
 
     expect(fr.rootCause.toLowerCase()).toMatch(/fix|change|membership/i);
   });
 
   test('stackTrace is non-empty for live failure', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug failing test'));
+    const result = await runDebugReview(makeTask('debug failing test'));
     const fr = result.failureReport!;
 
     expect(fr.stackTrace.length).toBeGreaterThan(0);
   });
 
   test('examines checkout.js and discountService.js', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount'));
+    const result = await runDebugReview(makeTask('debug discount'));
 
     const examined = result.filesExamined;
     expect(examined.some(f => f.includes('checkout.js'))).toBe(true);
@@ -169,30 +212,23 @@ describe('runDebugReviewAgent', () => {
   // -------------------------------------------------------------------------
 
   test('checkout.js is modified on disk after running the agent', async () => {
-    // Confirm the bug is present before the run
     const before = fs.readFileSync(CHECKOUT_JS, 'utf-8');
     expect(before).toMatch(/getDiscount\(\{\s*type\s*:\s*customer\.type/);
 
-    await runDebugReviewAgent(makeTask('apply fix'));
+    await runDebugReview(makeTask('apply fix'));
 
     const after = fs.readFileSync(CHECKOUT_JS, 'utf-8');
-    // Bug line must be gone
     expect(after).not.toMatch(/getDiscount\(\{\s*type\s*:\s*customer\.type/);
-    // Correct line must be present
     expect(after).toMatch(/getDiscount\(\{\s*membership\s*:\s*customer\.type/);
   });
 
   test('ecommerce-demo tests pass after the agent applies the fix', () => {
-    // Step 1: agent applies the fix
-    // (We invoke applyFix indirectly by running the agent; alternatively we can
-    // manipulate the file directly here to keep this test deterministic and fast.)
     const fixed = ORIGINAL_CHECKOUT.replace(
       /getDiscount\(\{\s*type\s*:\s*customer\.type\s*\}[^)]*\)/,
       'getDiscount({ membership: customer.type })',
     );
     fs.writeFileSync(CHECKOUT_JS, fixed, 'utf-8');
 
-    // Step 2: run ecommerce-demo Jest and assert all tests pass
     const jestEntry = path.join(ECOMMERCE_ROOT, 'node_modules', 'jest', 'bin', 'jest.js');
     let jestRaw = '';
     try {
@@ -218,24 +254,20 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('filesModified reports the correct repo-relative path', async () => {
-    const result = await runDebugReviewAgent(makeTask('check modified path'));
+    const result = await runDebugReview(makeTask('check modified path'));
 
-    // When the bug is present the agent fixes it and reports the path
     if (result.filesModified.length > 0) {
       expect(result.filesModified[0]).toBe('src/checkout/checkout.js');
     }
   });
 
   test('filesModified is empty when the bug is already fixed', async () => {
-    // Pre-apply the fix so the agent finds nothing to change
     const fixed = ORIGINAL_CHECKOUT.replace(
       /getDiscount\(\{\s*type\s*:\s*customer\.type\s*\}[^)]*\)/,
       'getDiscount({ membership: customer.type })',
     );
     fs.writeFileSync(CHECKOUT_JS, fixed, 'utf-8');
 
-    // Inject a full FailureReport to bypass the Jest subprocess (which would now
-    // see zero failures and return early via the "no failures" path).
     const injected: FailureReport = {
       testFailure: 'synthetic already-fixed test',
       stackTrace: '',
@@ -244,18 +276,15 @@ describe('runDebugReviewAgent', () => {
       confidence: 'LOW',
     };
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('already fixed', { failureReport: injected }),
     );
 
-    // The agent ran analyzeRootCause — but because checkout.js no longer has the
-    // buggy `type:` call, callerPassesType is false → no HIGH-confidence fix
-    // identified → applyFix finds nothing to change → filesModified stays empty.
     expect(result.filesModified).toEqual([]);
   });
 
   test('recommendedNextAction mentions fix-applied when a fix was written', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount test'));
+    const result = await runDebugReview(makeTask('debug discount test'));
 
     if (result.filesModified.length > 0) {
       expect(result.recommendedNextAction.toLowerCase()).toMatch(/fix applied|rerun/i);
@@ -267,20 +296,17 @@ describe('runDebugReviewAgent', () => {
   // -------------------------------------------------------------------------
 
   test('uses injected stack trace when provided via task context', async () => {
-    // Provide a fake stack trace pointing to a real file in the repo
     const fakeStack =
       'Error: Expected 10 but received 0\n' +
       '    at Object.<anonymous> (tests/discount.test.js:50:5)\n';
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('diagnose injected failure', {
         failingTest: 'injected test name',
         stackTrace: fakeStack,
       }),
     );
 
-    // The live Jest path will fire first (real failure exists), but the contract
-    // should hold regardless of which path ran
     expect(result.failureReport).toBeDefined();
     expect(result.failureReport!.rootCause.length).toBeGreaterThan(0);
   });
@@ -290,7 +316,7 @@ describe('runDebugReviewAgent', () => {
   // -------------------------------------------------------------------------
 
   test('recommendedNextAction mentions rerun or fix when failure detected', async () => {
-    const result = await runDebugReviewAgent(makeTask('debug discount test'));
+    const result = await runDebugReview(makeTask('debug discount test'));
 
     if (result.failureReport?.testFailure !== 'none') {
       expect(result.recommendedNextAction.toLowerCase()).toMatch(/fix|rerun|apply/i);
@@ -299,7 +325,6 @@ describe('runDebugReviewAgent', () => {
 
   // -------------------------------------------------------------------------
   // FailureReport injection — task.context.failureReport path
-  // (simulates TEST_QA handing a real FailureReport to DEBUG_REVIEW)
   // -------------------------------------------------------------------------
 
   test('accepts a full FailureReport injected via task.context.failureReport', async () => {
@@ -310,12 +335,12 @@ describe('runDebugReviewAgent', () => {
         'Error: expect(received).toBe(expected) // Object.is equality\n' +
         '\nExpected: 10\nReceived: 0\n' +
         `    at Object.toBe (${path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo', 'tests', 'discount.test.js')}:50:29)\n`,
-      relevantCode: '',   // empty — agent should fill this in
-      rootCause: '',      // empty — agent should compute this
-      confidence: 'LOW',  // should be upgraded to HIGH after analysis
+      relevantCode: '',
+      rootCause: '',
+      confidence: 'LOW',
     };
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('debug injected failure', { failureReport: injected }),
     );
 
@@ -339,7 +364,7 @@ describe('runDebugReviewAgent', () => {
       confidence: 'LOW',
     };
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('examine source files', { failureReport: injected }),
     );
 
@@ -349,8 +374,6 @@ describe('runDebugReviewAgent', () => {
   });
 
   test('injected FailureReport path does not re-run Jest (fast path)', async () => {
-    // When a FailureReport is injected, the agent should return quickly because
-    // it skips the Jest subprocess.  We verify the result is still fully valid.
     const injected: FailureReport = {
       testFailure: 'synthetic failing test',
       stackTrace: 'Error: synthetic\n    at Object.foo (fakefile.js:1:1)\n',
@@ -360,12 +383,11 @@ describe('runDebugReviewAgent', () => {
     };
 
     const start = Date.now();
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('fast path check', { failureReport: injected }),
     );
     const elapsed = Date.now() - start;
 
-    // Should complete in well under 10 s (no Jest subprocess)
     expect(elapsed).toBeLessThan(10_000);
     expect(result.failureReport).toBeDefined();
     expect(result.failureReport!.rootCause.length).toBeGreaterThan(0);
@@ -380,7 +402,7 @@ describe('runDebugReviewAgent', () => {
       confidence: 'LOW',
     };
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('preserve test name', { failureReport: injected }),
     );
 
@@ -392,8 +414,6 @@ describe('runDebugReviewAgent', () => {
   // -------------------------------------------------------------------------
 
   test('parseStackFrame handles Windows absolute paths in stack traces', async () => {
-    // Inject a stack trace with a real Windows-style absolute path to a file
-    // that actually exists in ecommerce-demo/tests/
     const realFile = path.resolve(
       __dirname, '..', '..', '..', 'ecommerce-demo', 'tests', 'discount.test.js',
     );
@@ -401,15 +421,13 @@ describe('runDebugReviewAgent', () => {
       `Error: Expected 10 but received 0\n` +
       `    at Object.toBe (${realFile}:50:29)\n`;
 
-    const result = await runDebugReviewAgent(
+    const result = await runDebugReview(
       makeTask('windows path parsing', {
         stackTrace: windowsStack,
         failingTest: 'windows path test',
       }),
     );
 
-    // The agent ran Jest (real failure exists), so the live path fired.
-    // In either case, the failureReport must be fully populated.
     expect(result.failureReport).toBeDefined();
     expect(result.failureReport!.rootCause.length).toBeGreaterThan(0);
   });
@@ -419,13 +437,8 @@ describe('runDebugReviewAgent', () => {
   // -------------------------------------------------------------------------
 
   test('runs real Jest and returns live counts (totalTests > 0)', async () => {
-    // If Jest is executed correctly via node + jest.js, it returns 10 tests.
-    // If the bash shim was used on Windows, Jest would fail silently and the
-    // agent would fall back to the injected-context path (which has no context
-    // here) and return testFailure: 'none'.  We verify the live path ran.
-    const result = await runDebugReviewAgent(makeTask('live jest run'));
+    const result = await runDebugReview(makeTask('live jest run'));
 
-    // The ecommerce-demo has 1 intentional failure — agent detects it
     expect(result.failureReport!.testFailure).not.toBe('none');
   });
 });
