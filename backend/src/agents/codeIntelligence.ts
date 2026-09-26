@@ -183,6 +183,7 @@ export async function runCodeIntelligenceAgent(task: AgentTask): Promise<AgentRe
     findings: finding,
     filesExamined,
     filesModified: [],
+    proposedModifications: finalAffected,
     confidence: riskLevel === 'LOW' ? 'HIGH' : riskLevel === 'MEDIUM' ? 'MEDIUM' : 'LOW',
     recommendedNextAction: 'Proceed to Test & QA analysis.',
     completedAt: new Date().toISOString(),

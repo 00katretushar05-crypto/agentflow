@@ -24,6 +24,30 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo');
 // Internal helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Collect all .js/.ts source files under `dir` whose path contains `stem`
+ * (case-insensitive).  Used to map failing test file names back to the source
+ * files they exercise.
+ */
+function walkSrcForStem(dir: string, stem: string): string[] {
+  const results: string[] = [];
+  if (!fs.existsSync(dir)) return results;
+
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const fullPath = path.join(dir, entry.name);
+    if (entry.isDirectory()) {
+      results.push(...walkSrcForStem(fullPath, stem));
+    } else if (
+      entry.isFile() &&
+      /\.[jt]s$/.test(entry.name) &&
+      entry.name.toLowerCase().includes(stem.toLowerCase())
+    ) {
+      results.push(fullPath);
+    }
+  }
+  return results;
+}
+
 /** Collect all .test.js files under `dir`. */
 function collectTestFiles(dir: string): string[] {
   const results: string[] = [];
@@ -82,7 +106,8 @@ interface JestAssertionResult {
 }
 
 interface JestTestSuiteResult {
-  testFilePath: string;
+  /** Absolute path to the test file — Jest uses "name" in its --json output. */
+  name: string;
   /** Jest uses "assertionResults" in --json output (not "testResults") */
   assertionResults: JestAssertionResult[];
 }
@@ -185,6 +210,33 @@ export async function runTestQAAgent(task: AgentTask): Promise<AgentResult> {
         ? ('SUCCESS' as const)
         : ('PARTIAL' as const);
 
+  // ----- Fragile-coverage detection ----------------------------------------
+  // A file is flagged "do not modify" when it has active tests whose coverage is
+  // currently fragile: either the tests are already failing (any change risks
+  // silent breakage) or the file is covered by relevant tests with no safety net
+  // (failed > 0 in the relevant test suite).
+  const doNotModify: string[] = [];
+
+  if (testResult.failed > 0 && jestOutput !== null) {
+    // Collect the set of source files exercised by failing test suites.
+    for (const suite of jestOutput.testResults) {
+      const hasFailure = (suite.assertionResults ?? []).some(a => a.status === 'failed');
+      if (!hasFailure) continue;
+
+      // The test file name (e.g. "checkout.test.js") implies coverage of the
+      // corresponding source module (e.g. "checkout").  Find all src files
+      // whose module name matches the stem of the failing test file.
+      const testStem = path.basename(suite.name ?? '').replace(/\.test\.[jt]s$/, '');
+      if (!testStem) continue;
+      const srcFilesForStem = walkSrcForStem(srcDir, testStem);
+
+      for (const f of srcFilesForStem) {
+        const rel = path.relative(REPO_ROOT, f).replace(/\\/g, '/');
+        if (!doNotModify.includes(rel)) doNotModify.push(rel);
+      }
+    }
+  }
+
   return {
     agent: 'TEST_QA',
     status,
@@ -192,6 +244,7 @@ export async function runTestQAAgent(task: AgentTask): Promise<AgentResult> {
     testResult,
     filesExamined,
     filesModified: [],
+    doNotModify: doNotModify.length > 0 ? doNotModify : undefined,
     confidence: jestOutput !== null ? 'HIGH' : 'LOW',
     recommendedNextAction:
       testResult.failed > 0
