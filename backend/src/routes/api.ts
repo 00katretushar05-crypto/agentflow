@@ -22,6 +22,7 @@ import {
   getRunState,
   getAllRunStates,
   approveSupervisorTask,
+  buildLedgerSummary,
 } from '../supervisor.js';
 
 export const apiRouter = Router();
@@ -129,6 +130,8 @@ apiRouter.get('/task/:id/evidence', (req: Request, res: Response) => {
       taskId: state.taskId,
       items,
       updatedAt: state.updatedAt,
+      // Enriched ledger summary — all 8 verification signals in one object.
+      ledger: buildLedgerSummary(state),
     },
   });
 });

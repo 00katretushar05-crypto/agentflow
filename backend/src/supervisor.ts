@@ -36,14 +36,17 @@ import type {
   StateTransition,
   AgentResult,
   AgentName,
-  FailureReport,
-  VerificationResult,
   AgentStatusEntry,
   AgentRunStatus,
 } from './types/contracts.js';
 import { transition, isTerminal } from './stateMachine.js';
 import { decomposeTask } from './taskDecomposer.js';
 import { runAgent } from './agentRunner.js';
+import {
+  buildLedgerSummary,
+  toVerificationResult,
+  buildFailureReport,
+} from './supervisor/evidenceLedger.js';
 
 // ---------------------------------------------------------------------------
 // In-memory store (single source of truth for this process)
@@ -80,6 +83,12 @@ export function getRunState(taskId: string): SupervisorTaskState | undefined {
 export function getAllRunStates(): SupervisorTaskState[] {
   return Array.from(runStore.values());
 }
+
+/**
+ * Returns the Evidence Ledger summary for a single run.
+ * Re-exported here so callers never need to import from the ledger module directly.
+ */
+export { buildLedgerSummary } from './supervisor/evidenceLedger.js';
 
 /**
  * Registers the SSE emitter callback provided by the Express SSE route.
@@ -181,6 +190,11 @@ export function approveSupervisorTask(taskId: string): SupervisorTaskState {
     'VERIFIED',
     'Human reviewer explicitly approved the task via POST /api/task/:id/approve.',
   );
+
+  // Record human approval in the verification result so the ledger reflects it.
+  if (state.verification) {
+    state.verification.humanApproved = true;
+  }
 
   return state;
 }
@@ -321,8 +335,17 @@ async function runTestingPhase(state: SupervisorTaskState): Promise<void> {
   const failures = qaResult.testResult?.failed ?? 0;
 
   if (failures > 0) {
-    // FAILURE DETECTION (requirement #7): if any TestResult.failed > 0,
-    // transition to FAILED and record why.  Never transition silently.
+    // FAILURE DETECTION: build a FailureReport from the ledger so the
+    // DEBUG_REVIEW agent receives structured evidence when dispatched later.
+    const failureReport = buildFailureReport(state);
+
+    // Store the FailureReport in the DEBUG_REVIEW subtask context so
+    // runRecoveryLoop() can inject it without re-deriving it.
+    const debugTask = getSubtasks(state).find((t) => t.agent === 'DEBUG_REVIEW');
+    if (debugTask && failureReport) {
+      debugTask.context = { ...debugTask.context, failureReport };
+    }
+
     applyTransition(
       state,
       'FAILED',
@@ -455,26 +478,16 @@ async function runVerificationPhase(state: SupervisorTaskState): Promise<void> {
 
   await delay(300); // Simulate final verification work.
 
-  // Build VerificationResult from collected agent results.
-  const qaResult = state.agentResults['TEST_QA'];
-  const ciResult = state.agentResults['CODE_INTELLIGENCE'];
-
-  const testsExecuted = qaResult?.testResult?.totalTests ?? 0;
-  const testsPassed   = qaResult?.testResult?.passed ?? 0;
-  const regressionPassed = (qaResult?.testResult?.failed ?? 1) === 0;
-  const requirementsMet  = ciResult?.status === 'SUCCESS' && regressionPassed;
-  const codeReviewed     = ciResult !== undefined;
-
-  const verification: VerificationResult = {
-    requirementsMet,
-    testsExecuted,
-    testsPassed,
-    regressionPassed,
-    codeReviewed,
-  };
+  // Derive VerificationResult via the Evidence Ledger — single source of truth
+  // for all verification signals.  This replaces the manual field-by-field
+  // construction that lived here before, keeping verification logic in one place.
+  const summary      = buildLedgerSummary(state);
+  const verification = toVerificationResult(summary);
 
   state.verification = verification;
   state.updatedAt    = new Date().toISOString();
+
+  const { requirementsMet, testsPassed, testsExecuted, regressionPassed } = verification;
 
   // Strictly validate all three conditions before advancing.
   if (!requirementsMet || testsPassed !== testsExecuted || !regressionPassed) {
@@ -494,7 +507,7 @@ async function runVerificationPhase(state: SupervisorTaskState): Promise<void> {
     `requirements met. Waiting for human approval before marking VERIFIED.`,
   );
 
-  // HUMAN APPROVAL GATE (requirement #11):
+  // HUMAN APPROVAL GATE:
   //   Nothing auto-transitions from AWAITING_APPROVAL.  The pipeline ends
   //   here.  approveSupervisorTask() must be called explicitly to advance.
 }

@@ -88,6 +88,8 @@ export interface VerificationResult {
   testsPassed: number;
   regressionPassed: boolean;
   codeReviewed: boolean;
+  /** Set to true once the run reaches the VERIFIED state via an explicit approve call. */
+  humanApproved?: boolean;
 }
 
 export interface AgentResult {
