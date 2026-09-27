@@ -4,12 +4,78 @@
 // NOTE: As of now, backend/src/routes, backend/src/agents, backend/src/supervisor, and
 // backend/src/types/contracts.ts are all still empty placeholders. No HTTP server exists yet,
 // so this test is expected to fail with a "backend not reachable" connection error until those
-// are implemented and a server is running on port 5000.
+// are implemented and a server is running on port 3001.
 
+import * as path from 'path';
+import * as fs from 'fs';
 import { describe, test, expect, beforeEach, afterAll } from 'vitest';
 import supertest from "supertest";
 
-const BASE_URL = "http://localhost:5000";
+// ---------------------------------------------------------------------------
+// checkout.js restore helpers
+// ---------------------------------------------------------------------------
+// Any test in this suite that triggers the real Debug Review agent will
+// write a fix to ecommerce-demo/src/checkout/checkout.js on disk.
+// The beforeEach/afterAll hooks below ensure every test starts from the
+// intentionally-buggy content and the file is left buggy after the suite.
+
+const CHECKOUT_JS = path.resolve(
+  __dirname, '..', '..', '..', 'ecommerce-demo', 'src', 'checkout', 'checkout.js',
+);
+
+/** Original (buggy) content — hardcoded so it is always the buggy version
+ *  regardless of the checkout.js state on disk at module-load time.
+ */
+const ORIGINAL_CHECKOUT = `/**
+ * checkout.js
+ * Handles the checkout flow: looks up the customer, applies a discount,
+ * and delegates order creation to orderService.
+ *
+ * ⚠️  INTENTIONAL DEMO BUG — hackathon target
+ *     Line marked [BUG] below passes \`customer.type\` to discountService,
+ *     but discountService.getDiscount() expects \`customer.membership\`.
+ *     Because the field names differ, premium customers receive 0 % discount
+ *     instead of the required 10 % (see requirements.md).
+ *
+ *     Fix: change \`type: customer.type\` → \`membership: customer.type\`
+ *     (or align the field name used across both modules).
+ */
+
+const { getDiscount } = require('../discounts/discountService');
+const { createOrder } = require('../orders/orderService');
+const { getUserById } = require('../users/userService');
+
+/**
+ * Processes checkout for a user.
+ * @param {string} userId
+ * @param {Array<{ id: string, price: number }>} items
+ * @returns {{ orderId: string, total: number, discount: number }}
+ */
+function checkout(userId, items) {
+  const customer = getUserById(userId);
+
+  const subtotal = items.reduce((sum, item) => sum + item.price, 0);
+
+  // [BUG] Should be { membership: customer.type } so discountService can
+  //       detect premium status.  Using \`type\` means membership is undefined
+  //       inside getDiscount(), so the 10 % branch is never reached.
+  const discountRate = getDiscount({ type: customer.type }); // ← INTENTIONAL BUG
+
+  const discount = subtotal * discountRate;
+  const total = subtotal - discount;
+
+  const order = createOrder({ userId, items, total, discount });
+
+  return { orderId: order.id, total, discount };
+}
+
+module.exports = { checkout };`;
+
+function restoreCheckout(): void {
+  fs.writeFileSync(CHECKOUT_JS, ORIGINAL_CHECKOUT, 'utf-8');
+}
+
+const BASE_URL = "http://localhost:3001";
 const request = supertest(BASE_URL);
 
 const POLL_INTERVAL_MS = 1_000;
@@ -88,6 +154,18 @@ async function pollUntilTerminal(
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe("Full task lifecycle", () => {
+  // Restore checkout.js to its intentionally-buggy state before each test so
+  // that any Debug Review agent invoked during this suite starts from a clean
+  // slate.  Restore one final time after the suite so the repo is always left
+  // with the intentional bug present for other test suites (e.g. testQA).
+  beforeEach(() => {
+    restoreCheckout();
+  });
+
+  afterAll(() => {
+    restoreCheckout();
+  });
+
   test("full task lifecycle reaches VERIFIED with passing evidence", async () => {
     try {
       // ── Step 1: Create task ──────────────────────────────────────────────
@@ -102,14 +180,13 @@ describe("Full task lifecycle", () => {
 
       const createBody = createRes.body as Record<string, unknown>;
 
-      const taskId = createBody.taskId as string;
+      const taskId = createBody.data.taskId as string;
       expect(typeof taskId).toBe("string");
       expect(taskId.length).toBeGreaterThan(0);
 
-      const initialStatus = createBody.status as string;
+      const initialStatus = createBody.data.status as string;
       expect(typeof initialStatus).toBe("string");
-      expect(["PENDING", "IN_PROGRESS"]).toContain(initialStatus);
-
+      expect(["RECEIVED", "PLANNING"]).toContain(initialStatus);
       // ── Step 2: Poll for terminal status ────────────────────────────────
       const { status: terminalStatus } = await pollUntilTerminal(taskId);
 
@@ -165,7 +242,7 @@ describe("Full task lifecycle", () => {
         // when no live server is available (CI / unit-test context).
         // The test is preserved here as documentation of the integration contract.
         console.warn(
-          "fullFlow.test.ts: backend not reachable on port 5000 — skipping integration test.",
+          "fullFlow.test.ts: backend not reachable on port 3001 — skipping integration test.",
           `(original error: ${err instanceof Error ? err.message : String(err)})`
         );
         return;
