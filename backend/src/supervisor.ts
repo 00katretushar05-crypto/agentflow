@@ -30,6 +30,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { computeRiskAssessment } from './riskGate.js';
 import type {
   SupervisorTaskState,
   SupervisorState,
@@ -484,8 +485,9 @@ async function runVerificationPhase(state: SupervisorTaskState): Promise<void> {
   const summary      = buildLedgerSummary(state);
   const verification = toVerificationResult(summary);
 
-  state.verification = verification;
-  state.updatedAt    = new Date().toISOString();
+  state.verification    = verification;
+  state.riskAssessment  = computeRiskAssessment(state);
+  state.updatedAt       = new Date().toISOString();
 
   const { requirementsMet, testsPassed, testsExecuted, regressionPassed } = verification;
 
@@ -494,18 +496,10 @@ async function runVerificationPhase(state: SupervisorTaskState): Promise<void> {
   // FAILED so the human-approval gate is only reached on a pristine first-pass run.
   // This also guards against DEBUG_REVIEW applying a partial fix that happens to pass
   // the existing tests while leaving the root cause unresolved in a real codebase.
-  if (state.retryCount > 0) {
-    applyTransition(
-      state,
-      'FAILED',
-      `Verification failed: ${state.retryCount} recovery attempt(s) were required. ` +
-      `A run that needed recovery cannot be auto-approved — retries exhausted or ` +
-      `recovery succeeded but the root cause may not be fully resolved.`,
-    );
-    return;
-  }
-
-  // Strictly validate all three conditions before advancing.
+    // Strictly validate all three conditions before advancing, regardless of
+  // whether recovery was needed. A recovered run that now genuinely passes
+  // everything still goes to AWAITING_APPROVAL — a human should review it,
+  // not auto-approve it silently, but it must not be killed outright either.
   if (!requirementsMet || testsPassed !== testsExecuted || !regressionPassed) {
     applyTransition(
       state,
@@ -516,11 +510,15 @@ async function runVerificationPhase(state: SupervisorTaskState): Promise<void> {
     return;
   }
 
+  const recoveryNote = state.retryCount > 0
+    ? ` Note: this run required ${state.retryCount} recovery attempt(s) — review DEBUG_REVIEW's diagnosis before approving.`
+    : '';
+
   applyTransition(
     state,
     'AWAITING_APPROVAL',
     `Verification passed: all ${testsExecuted} tests pass, regression clear, ` +
-    `requirements met. Waiting for human approval before marking VERIFIED.`,
+    `requirements met. Waiting for human approval before marking VERIFIED.${recoveryNote}`,
   );
 
   // HUMAN APPROVAL GATE:

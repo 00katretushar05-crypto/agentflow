@@ -96,10 +96,11 @@ function restoreCheckout(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Restore checkout.js after every test so subsequent tests start from the
-// expected buggy state.  Without this, the first test to apply the fix would
-// cause every later test (and testQA tests) to see a passing suite instead of
-// the intentional failure.
+// Restore checkout.js before and after every test so each test starts from
+// the expected buggy state, and restore it one final time after the whole
+// suite so the repo is always left with the intentional bug present.
+// Without this, the first test to apply the fix would cause every later test
+// (and testQA tests) to see a passing suite instead of the intentional failure.
 // ---------------------------------------------------------------------------
 
 describe('runDebugReview', () => {
@@ -148,7 +149,6 @@ describe('runDebugReview', () => {
   });
 
   test('filesModified contains checkout.js when the known bug is present', async () => {
-    // Ensure the bug is present before running
     restoreCheckout();
 
     const result = await runDebugReview(makeTask('debug tests'));
@@ -173,7 +173,6 @@ describe('runDebugReview', () => {
     const result = await runDebugReview(makeTask('why does premium discount fail'));
     const fr = result.failureReport!;
 
-    // There is a live failing test in ecommerce-demo
     expect(fr.testFailure).not.toBe('none');
     expect(fr.testFailure.toLowerCase()).toMatch(/premium/i);
   });
@@ -182,7 +181,6 @@ describe('runDebugReview', () => {
     const result = await runDebugReview(makeTask('debug discount regression'));
     const fr = result.failureReport!;
 
-    // The agent reads checkout.js + discountService.js and detects the mismatch
     expect(fr.confidence).toBe('HIGH');
     expect(fr.rootCause.toLowerCase()).toMatch(/field.?name|membership|type/i);
   });
@@ -214,30 +212,23 @@ describe('runDebugReview', () => {
   // -------------------------------------------------------------------------
 
   test('checkout.js is modified on disk after running the agent', async () => {
-    // Confirm the bug is present before the run
     const before = fs.readFileSync(CHECKOUT_JS, 'utf-8');
     expect(before).toMatch(/getDiscount\(\{\s*type\s*:\s*customer\.type/);
 
     await runDebugReview(makeTask('apply fix'));
 
     const after = fs.readFileSync(CHECKOUT_JS, 'utf-8');
-    // Bug line must be gone
     expect(after).not.toMatch(/getDiscount\(\{\s*type\s*:\s*customer\.type/);
-    // Correct line must be present
     expect(after).toMatch(/getDiscount\(\{\s*membership\s*:\s*customer\.type/);
   });
 
   test('ecommerce-demo tests pass after the agent applies the fix', () => {
-    // Step 1: agent applies the fix
-    // (We invoke applyFix indirectly by running the agent; alternatively we can
-    // manipulate the file directly here to keep this test deterministic and fast.)
     const fixed = ORIGINAL_CHECKOUT.replace(
       /getDiscount\(\{\s*type\s*:\s*customer\.type\s*\}[^)]*\)/,
       'getDiscount({ membership: customer.type })',
     );
     fs.writeFileSync(CHECKOUT_JS, fixed, 'utf-8');
 
-    // Step 2: run ecommerce-demo Jest and assert all tests pass
     const jestEntry = path.join(ECOMMERCE_ROOT, 'node_modules', 'jest', 'bin', 'jest.js');
     let jestRaw = '';
     try {
@@ -265,22 +256,18 @@ describe('runDebugReview', () => {
   test('filesModified reports the correct repo-relative path', async () => {
     const result = await runDebugReview(makeTask('check modified path'));
 
-    // When the bug is present the agent fixes it and reports the path
     if (result.filesModified.length > 0) {
       expect(result.filesModified[0]).toBe('src/checkout/checkout.js');
     }
   });
 
   test('filesModified is empty when the bug is already fixed', async () => {
-    // Pre-apply the fix so the agent finds nothing to change
     const fixed = ORIGINAL_CHECKOUT.replace(
       /getDiscount\(\{\s*type\s*:\s*customer\.type\s*\}[^)]*\)/,
       'getDiscount({ membership: customer.type })',
     );
     fs.writeFileSync(CHECKOUT_JS, fixed, 'utf-8');
 
-    // Inject a full FailureReport to bypass the Jest subprocess (which would now
-    // see zero failures and return early via the "no failures" path).
     const injected: FailureReport = {
       testFailure: 'synthetic already-fixed test',
       stackTrace: '',
@@ -293,9 +280,6 @@ describe('runDebugReview', () => {
       makeTask('already fixed', { failureReport: injected }),
     );
 
-    // The agent ran analyzeRootCause — but because checkout.js no longer has the
-    // buggy `type:` call, callerPassesType is false → no HIGH-confidence fix
-    // identified → applyFix finds nothing to change → filesModified stays empty.
     expect(result.filesModified).toEqual([]);
   });
 
@@ -312,7 +296,6 @@ describe('runDebugReview', () => {
   // -------------------------------------------------------------------------
 
   test('uses injected stack trace when provided via task context', async () => {
-    // Provide a fake stack trace pointing to a real file in the repo
     const fakeStack =
       'Error: Expected 10 but received 0\n' +
       '    at Object.<anonymous> (tests/discount.test.js:50:5)\n';
@@ -324,8 +307,6 @@ describe('runDebugReview', () => {
       }),
     );
 
-    // The live Jest path will fire first (real failure exists), but the contract
-    // should hold regardless of which path ran
     expect(result.failureReport).toBeDefined();
     expect(result.failureReport!.rootCause.length).toBeGreaterThan(0);
   });
@@ -344,7 +325,6 @@ describe('runDebugReview', () => {
 
   // -------------------------------------------------------------------------
   // FailureReport injection — task.context.failureReport path
-  // (simulates TEST_QA handing a real FailureReport to DEBUG_REVIEW)
   // -------------------------------------------------------------------------
 
   test('accepts a full FailureReport injected via task.context.failureReport', async () => {
@@ -355,9 +335,9 @@ describe('runDebugReview', () => {
         'Error: expect(received).toBe(expected) // Object.is equality\n' +
         '\nExpected: 10\nReceived: 0\n' +
         `    at Object.toBe (${path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo', 'tests', 'discount.test.js')}:50:29)\n`,
-      relevantCode: '',   // empty — agent should fill this in
-      rootCause: '',      // empty — agent should compute this
-      confidence: 'LOW',  // should be upgraded to HIGH after analysis
+      relevantCode: '',
+      rootCause: '',
+      confidence: 'LOW',
     };
 
     const result = await runDebugReview(
@@ -394,8 +374,6 @@ describe('runDebugReview', () => {
   });
 
   test('injected FailureReport path does not re-run Jest (fast path)', async () => {
-    // When a FailureReport is injected, the agent should return quickly because
-    // it skips the Jest subprocess.  We verify the result is still fully valid.
     const injected: FailureReport = {
       testFailure: 'synthetic failing test',
       stackTrace: 'Error: synthetic\n    at Object.foo (fakefile.js:1:1)\n',
@@ -410,7 +388,6 @@ describe('runDebugReview', () => {
     );
     const elapsed = Date.now() - start;
 
-    // Should complete in well under 10 s (no Jest subprocess)
     expect(elapsed).toBeLessThan(10_000);
     expect(result.failureReport).toBeDefined();
     expect(result.failureReport!.rootCause.length).toBeGreaterThan(0);
@@ -437,8 +414,6 @@ describe('runDebugReview', () => {
   // -------------------------------------------------------------------------
 
   test('parseStackFrame handles Windows absolute paths in stack traces', async () => {
-    // Inject a stack trace with a real Windows-style absolute path to a file
-    // that actually exists in ecommerce-demo/tests/
     const realFile = path.resolve(
       __dirname, '..', '..', '..', 'ecommerce-demo', 'tests', 'discount.test.js',
     );
@@ -453,8 +428,6 @@ describe('runDebugReview', () => {
       }),
     );
 
-    // The agent ran Jest (real failure exists), so the live path fired.
-    // In either case, the failureReport must be fully populated.
     expect(result.failureReport).toBeDefined();
     expect(result.failureReport!.rootCause.length).toBeGreaterThan(0);
   });
@@ -464,13 +437,8 @@ describe('runDebugReview', () => {
   // -------------------------------------------------------------------------
 
   test('runs real Jest and returns live counts (totalTests > 0)', async () => {
-    // If Jest is executed correctly via node + jest.js, it returns 10 tests.
-    // If the bash shim was used on Windows, Jest would fail silently and the
-    // agent would fall back to the injected-context path (which has no context
-    // here) and return testFailure: 'none'.  We verify the live path ran.
     const result = await runDebugReview(makeTask('live jest run'));
 
-    // The ecommerce-demo has 1 intentional failure — agent detects it
     expect(result.failureReport!.testFailure).not.toBe('none');
   });
 });
