@@ -6,9 +6,10 @@ import {
   HelpCircle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-import type { Verification, EvidenceLogItem } from "@/data/demo";
+import type { EvidenceLedger as EvidenceLedgerData, EvidenceLogItem } from "@/data/demo";
 
 // ─── Verification Checklist ────────────────────────────────────────────────────
+// Derived from the evidence endpoint's `ledger` object (GET /api/task/:id/evidence)
 
 interface CheckRow {
   label: string;
@@ -57,24 +58,30 @@ function VerificationRow({ label, passed, detail }: CheckRow) {
 }
 
 interface VerificationChecklistProps {
-  verification: Verification;
+  ledger: EvidenceLedgerData;
 }
 
-export function VerificationChecklist({ verification }: VerificationChecklistProps) {
+export function VerificationChecklist({ ledger }: VerificationChecklistProps) {
   const rows: CheckRow[] = [
-    { label: "Requirements Met", passed: verification.requirementsMet },
+    { label: "Requirement Confirmed", passed: ledger.requirementConfirmed },
+    { label: "Impact Analysis Done", passed: ledger.impactAnalysisDone },
     {
       label: "Tests Executed",
-      passed: verification.testsExecuted > 0,
-      detail: String(verification.testsExecuted),
+      passed: ledger.testsExecuted > 0,
+      detail: String(ledger.testsExecuted),
     },
     {
       label: "Tests Passed",
-      passed: verification.testsPassed === verification.testsExecuted,
-      detail: `${verification.testsPassed}/${verification.testsExecuted}`,
+      passed: ledger.testsExecuted > 0 && ledger.testsPassed === ledger.testsExecuted,
+      detail: `${ledger.testsPassed}/${ledger.testsExecuted}`,
     },
-    { label: "Regression Clear", passed: verification.regressionPassed },
-    { label: "Code Reviewed", passed: verification.codeReviewed },
+    { label: "Regression Clear", passed: ledger.regressionPassed },
+    { label: "Code Reviewed", passed: ledger.codeReviewStatus === "DONE" },
+    {
+      label: "Human Approval",
+      passed: ledger.humanApprovalStatus === "APPROVED",
+      detail: ledger.humanApprovalStatus,
+    },
   ];
 
   const passCount = rows.filter((r) => r.passed).length;
@@ -147,7 +154,6 @@ export function EvidenceLog({ items }: EvidenceLogProps) {
             key={item.seq}
             className="flex items-start gap-3 px-4 py-3 rounded-xl border border-white/[0.06] bg-[#111318]"
           >
-            {/* Type badge */}
             <div
               className={cn(
                 "flex items-center justify-center w-7 h-7 rounded-lg border shrink-0 mt-0.5",
@@ -157,7 +163,6 @@ export function EvidenceLog({ items }: EvidenceLogProps) {
               {cfg.icon}
             </div>
 
-            {/* Content */}
             <div className="flex-1 min-w-0">
               <p className="text-[12px] text-white/70 leading-relaxed">{item.summary}</p>
               <div className="flex items-center gap-2 mt-1">
@@ -178,7 +183,6 @@ export function EvidenceLog({ items }: EvidenceLogProps) {
               </div>
             </div>
 
-            {/* Seq number */}
             <span className="text-[10px] text-white/20 font-mono shrink-0 mt-1">
               #{item.seq}
             </span>
@@ -190,19 +194,17 @@ export function EvidenceLog({ items }: EvidenceLogProps) {
 }
 
 // ─── Combined EvidenceLedger ───────────────────────────────────────────────────
-// Keeps the old prop name for backwards compat with Evidence.tsx
 
 interface EvidenceLedgerProps {
-  verification: Verification | null;
+  ledger: EvidenceLedgerData | null;
   logItems: EvidenceLogItem[];
 }
 
-export function EvidenceLedger({ verification, logItems }: EvidenceLedgerProps) {
+export function EvidenceLedger({ ledger, logItems }: EvidenceLedgerProps) {
   return (
     <div className="space-y-8">
-      {/* Section 1: Verification checklist */}
-      {verification ? (
-        <VerificationChecklist verification={verification} />
+      {ledger ? (
+        <VerificationChecklist ledger={ledger} />
       ) : (
         <div className="space-y-1.5">
           <p className="text-[10px] tracking-widest text-white/25 uppercase font-semibold mb-3">
@@ -214,7 +216,6 @@ export function EvidenceLedger({ verification, logItems }: EvidenceLedgerProps) 
         </div>
       )}
 
-      {/* Section 2: Chronological evidence log */}
       <div>
         <div className="flex items-center justify-between mb-3">
           <p className="text-[10px] tracking-widest text-white/25 uppercase font-semibold">

@@ -127,9 +127,27 @@ export interface EvidenceLogItem {
   payload?: unknown;
 }
 
+/**
+ * Checklist-style summary returned alongside the chronological `items` log.
+ * Confirmed from live backend response (2026-09-27) — not yet documented
+ * in API_CONTRACT.md, but present on every /evidence response observed.
+ */
+export interface EvidenceLedger {
+  requirementConfirmed: boolean;
+  impactAnalysisDone: boolean;
+  filesChangedCount: number;
+  testsExecuted: number;
+  testsPassed: number;
+  regressionPassed: boolean;
+  codeReviewStatus: string;
+  humanApprovalStatus: string;
+}
+
 export interface EvidenceResponse {
   taskId: string;
   items: EvidenceLogItem[];
+  updatedAt: string;
+  ledger: EvidenceLedger;
 }
 
 // ─── GET /api/tasks ────────────────────────────────────────────────────────────
@@ -437,6 +455,17 @@ export const MOCK_EVIDENCE: EvidenceResponse = {
       summary: "Verification passed. Awaiting human approval.",
     },
   ],
+  updatedAt: "2026-09-27T04:34:34.253Z",
+  ledger: {
+    requirementConfirmed: true,
+    impactAnalysisDone: true,
+    filesChangedCount: 4,
+    testsExecuted: 10,
+    testsPassed: 10,
+    regressionPassed: true,
+    codeReviewStatus: "DONE",
+    humanApprovalStatus: "PENDING",
+  },
 };
 
 // ─── Mock: GET /api/tasks ──────────────────────────────────────────────────────

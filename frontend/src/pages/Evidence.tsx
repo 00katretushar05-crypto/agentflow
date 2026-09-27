@@ -64,7 +64,6 @@ export function Evidence() {
     try {
       await approveTask(taskId);
       setApproved(true);
-      // Refresh task status after approval
       const updated = await getTask(taskId);
       setTask(updated);
     } catch (err) {
@@ -81,7 +80,6 @@ export function Evidence() {
     }
   }
 
-  // ── Loading ────────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <div className="max-w-3xl mx-auto px-6 py-8 flex items-center justify-center h-64">
@@ -93,7 +91,6 @@ export function Evidence() {
     );
   }
 
-  // ── Error (nothing loaded) ─────────────────────────────────────────────────
   if (!task || !evidence) {
     return (
       <div className="max-w-3xl mx-auto px-6 py-8 space-y-3">
@@ -117,26 +114,27 @@ export function Evidence() {
     );
   }
 
-  // ── Derived ────────────────────────────────────────────────────────────────
-  const verification = task.verification;
+  const ledger = evidence.ledger;
   const riskAssessment = task.riskAssessment;
-  const ciResult = task.agentResults?.["CODE_INTELLIGENCE"];
-  const filesChanged = ciResult?.findings?.affectedFiles?.length ?? 0;
 
-  // Evidence score: count passing checklist items if verification exists
-  const checklistTotal = verification ? 5 : 0;
-  const checklistPassed = verification
+  const checklistRows = ledger
     ? [
-        verification.requirementsMet,
-        verification.testsExecuted > 0,
-        verification.testsPassed === verification.testsExecuted,
-        verification.regressionPassed,
-        verification.codeReviewed,
-      ].filter(Boolean).length
-    : 0;
+        ledger.requirementConfirmed,
+        ledger.impactAnalysisDone,
+        ledger.testsExecuted > 0,
+        ledger.testsExecuted > 0 && ledger.testsPassed === ledger.testsExecuted,
+        ledger.regressionPassed,
+        ledger.codeReviewStatus === "DONE",
+        ledger.humanApprovalStatus === "APPROVED",
+      ]
+    : [];
 
-  const testsExecuted = verification?.testsExecuted ?? null;
-  const testsPassed = verification?.testsPassed ?? null;
+  const checklistTotal = checklistRows.length;
+  const checklistPassed = checklistRows.filter(Boolean).length;
+
+  const filesChanged = ledger?.filesChangedCount ?? 0;
+  const testsExecuted = ledger?.testsExecuted ?? null;
+  const testsPassed = ledger?.testsPassed ?? null;
 
   const isVerified = task.status === "VERIFIED" || approved;
   const isFailed = task.status === "FAILED";
@@ -144,7 +142,6 @@ export function Evidence() {
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-8 space-y-8">
-      {/* Header */}
       <div className="space-y-3">
         <button
           onClick={() => navigate(-1)}
@@ -167,7 +164,6 @@ export function Evidence() {
         </div>
       </div>
 
-      {/* Summary bar */}
       <div className="rounded-xl border border-white/[0.07] bg-[#111318] p-5">
         <div className="flex items-center justify-between gap-6">
           <div className="flex items-center gap-3">
@@ -183,7 +179,6 @@ export function Evidence() {
             </div>
           </div>
 
-          {/* Progress bar */}
           <div className="flex-1 max-w-xs space-y-1.5">
             <div className="flex justify-between text-[10px] text-white/30">
               <span>Completion</span>
@@ -208,7 +203,6 @@ export function Evidence() {
           )}
         </div>
 
-        {/* Risk recommendation */}
         {riskAssessment?.recommendation && (
           <p className="mt-3 pt-3 border-t border-white/[0.05] text-[12px] text-white/40 leading-relaxed">
             {riskAssessment.recommendation}
@@ -216,7 +210,6 @@ export function Evidence() {
         )}
       </div>
 
-      {/* Stats */}
       <div className="grid grid-cols-3 gap-3">
         {[
           { label: "Files Changed", value: filesChanged > 0 ? filesChanged : "—" },
@@ -233,13 +226,11 @@ export function Evidence() {
         ))}
       </div>
 
-      {/* EvidenceLedger: verification checklist + evidence log */}
       <EvidenceLedger
-        verification={verification}
+        ledger={ledger}
         logItems={evidence.items}
       />
 
-      {/* FAILED message */}
       {isFailed && (
         <div className="rounded-xl border border-red-500/20 bg-red-500/[0.04] p-5">
           <p className="text-[13px] font-semibold text-red-300 mb-1">Task failed</p>
@@ -249,7 +240,6 @@ export function Evidence() {
         </div>
       )}
 
-      {/* Approve button — only when awaiting approval */}
       {canApprove && (
         <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-5">
           <p className="text-[12px] text-white/50 mb-3">
@@ -276,7 +266,6 @@ export function Evidence() {
         </div>
       )}
 
-      {/* Post-approval confirmation */}
       {(isVerified && !isFailed) && (
         <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-5 flex items-center gap-3">
           <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
