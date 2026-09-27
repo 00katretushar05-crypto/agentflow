@@ -152,6 +152,8 @@ export interface SupervisorTaskState {
   /** Hard cap enforced by the Supervisor — prevents infinite retry loops in a live demo. */
   maxRetries: number;
   verification?: VerificationResult;
+  /** Risk assessment computed by riskGate.ts during the VERIFYING phase. */
+  riskAssessment?: RiskAssessment;
   risk?: {
     filesAffected: number;
     functionsAffected: number;
@@ -161,6 +163,25 @@ export interface SupervisorTaskState {
   };
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Computed by riskGate.ts from existing agent results during the VERIFYING phase.
+ * Stored on SupervisorTaskState.riskAssessment after verification runs.
+ */
+export interface RiskAssessment {
+  /** Number of source files flagged by CODE_INTELLIGENCE. */
+  filesAffected: number;
+  /** Number of functions flagged by CODE_INTELLIGENCE. */
+  functionsAffected: number;
+  /** Total test count from TEST_QA's latest run. */
+  testsCovered: number;
+  /** Risk level taken directly from CODE_INTELLIGENCE findings. */
+  dependencyImpact: 'LOW' | 'MEDIUM' | 'HIGH';
+  /** 0–100 score computed by the deterministic formula in riskGate.ts. */
+  riskPercent: number;
+  /** One-sentence human-readable recommendation based on riskPercent thresholds. */
+  recommendation: string;
 }
 
 /** Standard error shape for every API error response — keeps error handling consistent across all routes. */

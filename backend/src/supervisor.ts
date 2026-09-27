@@ -30,6 +30,7 @@
  */
 
 import { v4 as uuidv4 } from 'uuid';
+import { computeRiskAssessment } from './riskGate.js';
 import type {
   SupervisorTaskState,
   SupervisorState,
@@ -484,8 +485,9 @@ async function runVerificationPhase(state: SupervisorTaskState): Promise<void> {
   const summary      = buildLedgerSummary(state);
   const verification = toVerificationResult(summary);
 
-  state.verification = verification;
-  state.updatedAt    = new Date().toISOString();
+  state.verification    = verification;
+  state.riskAssessment  = computeRiskAssessment(state);
+  state.updatedAt       = new Date().toISOString();
 
   const { requirementsMet, testsPassed, testsExecuted, regressionPassed } = verification;
 
