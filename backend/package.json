@@ -4,9 +4,10 @@
   "description": "AgentFlow Supervisor Engine — backend",
   "private": true,
   "type": "module",
-  "main": "dist/index.js",
+  "main": "dist/src/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
     "build": "tsc --project tsconfig.json",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
