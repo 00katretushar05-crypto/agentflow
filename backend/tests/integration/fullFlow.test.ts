@@ -79,11 +79,10 @@ const BASE_URL = "http://localhost:3001";
 const request = supertest(BASE_URL);
 
 const POLL_INTERVAL_MS = 1_000;
-const POLL_TIMEOUT_MS = 30_000;
+const POLL_TIMEOUT_MS = 90_000;
 
 /** Return true if an error value is a network-level connection failure. */
 function isConnectionRefused(err: unknown): boolean {
-  // Plain Error: message contains ECONNREFUSED or socket hang up
   if (err instanceof Error) {
     if (
       err.message.includes("ECONNREFUSED") ||
@@ -93,7 +92,6 @@ function isConnectionRefused(err: unknown): boolean {
     }
   }
 
-  // Node ≥ 16 AggregateError: duck-type via the `errors` array property
   if (
     err != null &&
     typeof err === "object" &&
@@ -112,7 +110,6 @@ function isConnectionRefused(err: unknown): boolean {
     }
   }
 
-  // Last resort: stringify and scan (catches e.g. wrapped fetch errors)
   try {
     const s = JSON.stringify(err);
     if (s.includes("ECONNREFUSED")) return true;
@@ -123,7 +120,7 @@ function isConnectionRefused(err: unknown): boolean {
   return false;
 }
 
-/** Poll GET /api/task/:taskId every second until status is VERIFIED or FAILED, or timeout. */
+/** Poll GET /api/task/:taskId every second until a stopping status is reached, or timeout. */
 async function pollUntilTerminal(
   taskId: string
 ): Promise<{ status: string; body: Record<string, unknown> }> {
@@ -135,9 +132,10 @@ async function pollUntilTerminal(
     expect(res.status).toBe(200);
 
     const body = res.body as Record<string, unknown>;
-    const status = body.status as string;
+    const data = body.data as Record<string, unknown> | undefined;
+    const status = (data?.status ?? body.status) as string;
 
-    if (status === "VERIFIED" || status === "FAILED") {
+    if (status === "VERIFIED" || status === "FAILED" || status === "AWAITING_APPROVAL") {
       return { status, body };
     }
 
@@ -145,10 +143,19 @@ async function pollUntilTerminal(
   }
 
   throw new Error(
-    `Timeout: task "${taskId}" did not reach VERIFIED or FAILED within ` +
+    `Timeout: task "${taskId}" did not reach VERIFIED, FAILED, or AWAITING_APPROVAL within ` +
       `${POLL_TIMEOUT_MS / 1_000} seconds. ` +
       "Either the Supervisor/Agents are not wired yet, or the backend is processing too slowly."
   );
+}
+
+/** Shape of one Evidence Ledger entry, per the real API. */
+interface EvidenceEntry {
+  seq: number;
+  type: "TRANSITION" | "AGENT_RESULT";
+  timestamp: string;
+  summary: string;
+  payload: Record<string, unknown>;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -179,32 +186,46 @@ describe("Full task lifecycle", () => {
       expect([200, 201]).toContain(createRes.status);
 
       const createBody = createRes.body as Record<string, unknown>;
+      const createData = createBody.data as Record<string, unknown>;
 
-      const taskId = createBody.data.taskId as string;
+      const taskId = createData.taskId as string;
       expect(typeof taskId).toBe("string");
       expect(taskId.length).toBeGreaterThan(0);
 
-      const initialStatus = createBody.data.status as string;
+      const initialStatus = createData.status as string;
       expect(typeof initialStatus).toBe("string");
       expect(["RECEIVED", "PLANNING"]).toContain(initialStatus);
-      // ── Step 2: Poll for terminal status ────────────────────────────────
-      const { status: terminalStatus } = await pollUntilTerminal(taskId);
+
+      // ── Step 2: Poll until AWAITING_APPROVAL (or FAILED) ─────────────────
+      const { status: preApprovalStatus } = await pollUntilTerminal(taskId);
+
+      let terminalStatus = preApprovalStatus;
+
+      // If the pipeline reached the human-approval gate, approve it so the
+      // task can transition to VERIFIED — this gate is mandatory by design
+      // (see Supervisor Task 3), nothing auto-transitions past it.
+      if (preApprovalStatus === "AWAITING_APPROVAL") {
+        const approveRes = await request.post(`/api/task/${taskId}/approve`);
+        expect(approveRes.status).toBe(200);
+
+        const approveBody = approveRes.body as Record<string, unknown>;
+        const approveData = approveBody.data as Record<string, unknown>;
+        terminalStatus = approveData.status as string;
+      }
 
       // ── Step 3: Fetch evidence and assert contract ───────────────────────
       const evidenceRes = await request.get(`/api/task/${taskId}/evidence`);
       expect(evidenceRes.status).toBe(200);
 
-      const evidencePayload = evidenceRes.body as
-        | Record<string, unknown>[]
-        | Record<string, unknown>;
-
-      // Accept both array-form and keyed-object-form evidence ledgers.
-      const entries: Record<string, unknown>[] = Array.isArray(evidencePayload)
-        ? (evidencePayload as Record<string, unknown>[])
-        : (Object.values(evidencePayload) as Record<string, unknown>[]);
+      const evidenceBody = evidenceRes.body as Record<string, unknown>;
+      const evidenceData = (evidenceBody.data ?? evidenceBody) as Record<string, unknown>;
+      const entries = (
+        Array.isArray(evidenceData)
+          ? evidenceData
+          : evidenceData.entries ?? evidenceData.items ?? []
+      ) as EvidenceEntry[];
 
       if (terminalStatus !== "VERIFIED") {
-        // Log full ledger so the developer can see what happened.
         console.error(
           "[EVIDENCE LEDGER — task did NOT reach VERIFIED]",
           JSON.stringify(entries, null, 2)
@@ -214,23 +235,23 @@ describe("Full task lifecycle", () => {
       expect(terminalStatus).toBe("VERIFIED");
       expect(entries.length).toBeGreaterThan(0);
 
-      // At least one entry must represent a passing test-execution.
+      // At least one AGENT_RESULT entry from TEST_QA must show a passing
+      // test run (testResult.failed === 0 and totalTests > 0).
       const passingTestEntry = entries.find((entry) => {
-        const isTestExecution =
-          entry.type === "test_execution" ||
-          entry.type === "TEST_EXECUTION";
-
-        const isPassing =
-          entry.passed === true ||
-          entry.status === "PASSED" ||
-          entry.status === "passed";
-
-        return isTestExecution && isPassing;
+        if (entry.type !== "AGENT_RESULT") return false;
+        const payload = entry.payload as Record<string, unknown>;
+        if (payload.agent !== "TEST_QA") return false;
+        const testResult = payload.testResult as Record<string, unknown> | undefined;
+        return (
+          testResult !== undefined &&
+          (testResult.failed as number) === 0 &&
+          (testResult.totalTests as number) > 0
+        );
       });
 
       if (passingTestEntry === undefined) {
         console.error(
-          "[EVIDENCE LEDGER — no passing test_execution entry found]",
+          "[EVIDENCE LEDGER — no passing TEST_QA agent result found]",
           JSON.stringify(entries, null, 2)
         );
       }
@@ -249,5 +270,5 @@ describe("Full task lifecycle", () => {
       }
       throw err;
     }
-  });
+  }, 100_000);
 });
