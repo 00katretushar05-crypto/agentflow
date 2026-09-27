@@ -35,6 +35,13 @@ const STATUS_CONFIG = {
     labelClass: "text-white/25 bg-white/[0.05]",
     rowClass: "border-white/[0.04]",
   },
+} as const;
+
+const FALLBACK_STATUS_CONFIG = {
+  icon: <Clock className="w-4 h-4 text-white/25" />,
+  label: "UNKNOWN",
+  labelClass: "text-white/25 bg-white/[0.05]",
+  rowClass: "border-white/[0.04]",
 };
 
 interface EvidenceLedgerProps {
@@ -47,7 +54,10 @@ export function EvidenceLedger({ items }: EvidenceLedgerProps) {
   return (
     <div className="space-y-1.5">
       {items.map((item, i) => {
-        const cfg = STATUS_CONFIG[item.status];
+        const cfg = STATUS_CONFIG[item.status as keyof typeof STATUS_CONFIG] ?? (() => {
+          console.warn(`[EvidenceLedger] Unrecognized evidence status: "${item.status}"`);
+          return FALLBACK_STATUS_CONFIG;
+        })();
         const itemKey = `${item.label}-${i}`;
         const isOpen = expanded === itemKey;
 

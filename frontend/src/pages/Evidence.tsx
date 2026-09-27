@@ -1,27 +1,130 @@
+import { useState, useEffect } from "react";
 import { useParams, useNavigate } from "react-router-dom";
-import { ArrowLeft, ChevronRight, Shield } from "lucide-react";
+import { ArrowLeft, ChevronRight, Shield, Loader2, AlertCircle, CheckCircle2 } from "lucide-react";
 import { EvidenceLedger } from "@/components/EvidenceLedger";
 import { StatusBadge } from "@/components/StatusBadge";
 import { RiskGauge } from "@/components/RiskGauge";
-import { MOCK_EVIDENCE, MOCK_TASK, MOCK_TASKS } from "@/data/demo";
+import type { TaskDetail, EvidenceResponse } from "@/data/demo";
+import { getTask, getEvidence, approveTask, ApiError } from "@/lib/api";
 
 export function Evidence() {
-  const { taskId } = useParams();
+  const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
 
-  // Task summary for header (goal + status)
-  const taskSummary =
-    MOCK_TASKS.tasks.find((t) => t.taskId === taskId) ?? MOCK_TASKS.tasks[0];
+  const [task, setTask] = useState<TaskDetail | null>(null);
+  const [evidence, setEvidence] = useState<EvidenceResponse | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [unreachable, setUnreachable] = useState(false);
 
-  // Evidence response — when real API is wired, swap for GET /api/task/:id/evidence
-  const evidence = MOCK_EVIDENCE;
+  const [approving, setApproving] = useState(false);
+  const [approveError, setApproveError] = useState<string | null>(null);
+  const [approved, setApproved] = useState(false);
 
+  useEffect(() => {
+    if (!taskId) return;
+    let cancelled = false;
+
+    async function load() {
+      try {
+        const [taskData, evidenceData] = await Promise.all([
+          getTask(taskId!),
+          getEvidence(taskId!),
+        ]);
+        if (!cancelled) {
+          setTask(taskData);
+          setEvidence(evidenceData);
+          setError(null);
+          setUnreachable(false);
+        }
+      } catch (err) {
+        if (cancelled) return;
+        const isUnreachable = err instanceof ApiError && err.unreachable;
+        setUnreachable(isUnreachable);
+        setError(
+          isUnreachable
+            ? "Backend not reachable — make sure the server is running on port 3001."
+            : err instanceof Error
+            ? err.message
+            : "Failed to load evidence.",
+        );
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    }
+
+    load();
+    return () => { cancelled = true; };
+  }, [taskId]);
+
+  async function handleApprove() {
+    if (!taskId) return;
+    setApproving(true);
+    setApproveError(null);
+    try {
+      await approveTask(taskId);
+      setApproved(true);
+      // Refresh task status after approval
+      const updated = await getTask(taskId);
+      setTask(updated);
+    } catch (err) {
+      const isUnreachable = err instanceof ApiError && err.unreachable;
+      setApproveError(
+        isUnreachable
+          ? "Backend not reachable — approval could not be submitted."
+          : err instanceof Error
+          ? err.message
+          : "Failed to approve task.",
+      );
+    } finally {
+      setApproving(false);
+    }
+  }
+
+  // ── Loading ────────────────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div className="max-w-3xl mx-auto px-6 py-8 flex items-center justify-center h-64">
+        <div className="flex items-center gap-3 text-white/40">
+          <Loader2 className="w-5 h-5 animate-spin" />
+          <span className="text-[14px]">Loading evidence…</span>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Error (nothing loaded) ─────────────────────────────────────────────────
+  if (!task || !evidence) {
+    return (
+      <div className="max-w-3xl mx-auto px-6 py-8 space-y-3">
+        <button
+          onClick={() => navigate(-1)}
+          className="flex items-center gap-1.5 text-[12px] text-white/30 hover:text-white/60 transition-colors"
+        >
+          <ArrowLeft className="w-3.5 h-3.5" />
+          Back
+        </button>
+        <div className="flex items-start gap-3 px-5 py-4 rounded-xl border border-red-500/25 bg-red-500/[0.07] text-red-300">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="text-[13px] font-semibold">
+              {unreachable ? "Backend not reachable" : "Failed to load evidence"}
+            </p>
+            <p className="text-[12px] text-red-300/70">{error}</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Derived ────────────────────────────────────────────────────────────────
   const passed = evidence.items.filter((e) => e.status === "PASS").length;
   const total = evidence.items.length;
-
-  // Derive stats from MOCK_TASK's CODE_INTELLIGENCE result when available
-  const ciResult = MOCK_TASK.agentResults["CODE_INTELLIGENCE"];
-  const filesChanged = ciResult?.findings.affectedFiles.length ?? 0;
+  const ciResult = task.agentResults?.["CODE_INTELLIGENCE"];
+  const filesChanged = ciResult?.findings?.affectedFiles?.length ?? 0;
+  const isVerified = task.status === "VERIFIED" || approved;
+  const isFailed = task.status === "FAILED";
+  const canApprove = task.status === "AWAITING_APPROVAL" && !approved;
 
   return (
     <div className="max-w-3xl mx-auto px-6 py-8 space-y-8">
@@ -42,9 +145,9 @@ export function Evidence() {
               <ChevronRight className="w-3 h-3" />
               <span className="font-mono text-white/50">{evidence.taskId}</span>
             </div>
-            <h1 className="text-xl font-bold text-white/90">{taskSummary.goal}</h1>
+            <h1 className="text-xl font-bold text-white/90">{task.goal}</h1>
           </div>
-          <StatusBadge variant={taskSummary.status} dot />
+          <StatusBadge variant={task.status} dot />
         </div>
       </div>
 
@@ -68,17 +171,17 @@ export function Evidence() {
           <div className="flex-1 max-w-xs space-y-1.5">
             <div className="flex justify-between text-[10px] text-white/30">
               <span>Completion</span>
-              <span>{Math.round((passed / total) * 100)}%</span>
+              <span>{total > 0 ? Math.round((passed / total) * 100) : 0}%</span>
             </div>
             <div className="h-1.5 rounded-full bg-white/[0.07] overflow-hidden">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-emerald-500 transition-all duration-700"
-                style={{ width: `${(passed / total) * 100}%` }}
+                style={{ width: total > 0 ? `${(passed / total) * 100}%` : "0%" }}
               />
             </div>
           </div>
 
-          <RiskGauge level={MOCK_TASK.risk ?? "MEDIUM"} showLabel />
+          <RiskGauge level={task.risk ?? "MEDIUM"} showLabel />
         </div>
       </div>
 
@@ -107,16 +210,51 @@ export function Evidence() {
         <EvidenceLedger items={evidence.items} />
       </div>
 
-      {/* Approve Button — only when no tests are still pending/in-progress */}
-      {taskSummary.status !== "VERIFIED" && (
+      {/* FAILED message */}
+      {isFailed && (
+        <div className="rounded-xl border border-red-500/20 bg-red-500/[0.04] p-5">
+          <p className="text-[13px] font-semibold text-red-300 mb-1">Task failed</p>
+          <p className="text-[12px] text-white/40">
+            This task reached a terminal FAILED state. No further automated action will be taken.
+          </p>
+        </div>
+      )}
+
+      {/* Approve button — only when awaiting approval */}
+      {canApprove && (
         <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-5">
           <p className="text-[12px] text-white/50 mb-3">
             All automated checks have passed. Human approval required before merge.
           </p>
-          <button className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-[13px] font-semibold transition-colors shadow-lg shadow-emerald-500/20">
-            <Shield className="w-4 h-4" />
-            Approve & Merge
+          {approveError && (
+            <div className="flex items-start gap-2 mb-3 text-[12px] text-red-300">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{approveError}</span>
+            </div>
+          )}
+          <button
+            onClick={handleApprove}
+            disabled={approving}
+            className="flex items-center gap-2 px-5 py-2.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-60 disabled:cursor-not-allowed text-white text-[13px] font-semibold transition-colors shadow-lg shadow-emerald-500/20"
+          >
+            {approving ? (
+              <Loader2 className="w-4 h-4 animate-spin" />
+            ) : (
+              <Shield className="w-4 h-4" />
+            )}
+            {approving ? "Submitting…" : "Approve & Merge"}
           </button>
+        </div>
+      )}
+
+      {/* Post-approval confirmation */}
+      {(isVerified && !isFailed) && (
+        <div className="rounded-xl border border-emerald-500/20 bg-emerald-500/[0.04] p-5 flex items-center gap-3">
+          <CheckCircle2 className="w-5 h-5 text-emerald-400 shrink-0" />
+          <div>
+            <p className="text-[13px] font-semibold text-emerald-300">Task verified</p>
+            <p className="text-[12px] text-white/40">This task has been approved and marked as verified.</p>
+          </div>
         </div>
       )}
     </div>

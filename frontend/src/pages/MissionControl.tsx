@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useParams, useNavigate } from "react-router-dom";
 import {
   CheckCircle2,
@@ -8,8 +8,9 @@ import {
   Clock,
   ArrowRight,
   ChevronRight,
-  Play,
-  RotateCcw,
+  AlertCircle,
+  XCircle,
+  Loader2,
 } from "lucide-react";
 import { WorkflowTimeline } from "@/components/WorkflowTimeline";
 import { AgentCard } from "@/components/AgentCard";
@@ -19,131 +20,171 @@ import { RiskGauge } from "@/components/RiskGauge";
 import { CodeDiff } from "@/components/CodeDiff";
 import { StatusBadge } from "@/components/StatusBadge";
 import {
-  MOCK_TASK,
   AGENT_META,
   toAgentStatus,
   supervisorStateToStage,
   CODE_DIFF,
 } from "@/data/demo";
-import type { SupervisorState, AgentRunStatus, WorkflowStage, HistoryEntry } from "@/data/demo";
+import type { TaskDetail, WorkflowStage } from "@/data/demo";
+import { getTask, approveTask, ApiError, isTerminal } from "@/lib/api";
 
-// ─── Stage-advance simulation ─────────────────────────────────────────────────
-// Ordered sequence of supervisor states for the demo replay
-const DEMO_STATES: SupervisorState[] = [
-  "RECEIVED",
-  "PLANNING",
-  "ANALYZING",
-  "IMPLEMENTING",
-  "TESTING",
-  "VERIFYING",
-  "AWAITING_APPROVAL",
-  "VERIFIED",
-];
-
-// Per-step agent status snapshots
-const DEMO_AGENT_STATUSES: Record<SupervisorState, Record<string, AgentRunStatus>> = {
-  RECEIVED:          { CODE_INTELLIGENCE: "PENDING",     TEST_QA: "PENDING",     DEBUG_REVIEW: "PENDING" },
-  PLANNING:          { CODE_INTELLIGENCE: "PENDING",     TEST_QA: "PENDING",     DEBUG_REVIEW: "PENDING" },
-  ANALYZING:         { CODE_INTELLIGENCE: "IN_PROGRESS", TEST_QA: "PENDING",     DEBUG_REVIEW: "PENDING" },
-  IMPLEMENTING:      { CODE_INTELLIGENCE: "DONE",        TEST_QA: "PENDING",     DEBUG_REVIEW: "PENDING" },
-  TESTING:           { CODE_INTELLIGENCE: "DONE",        TEST_QA: "IN_PROGRESS", DEBUG_REVIEW: "PENDING" },
-  RECOVERING:        { CODE_INTELLIGENCE: "DONE",        TEST_QA: "DONE",        DEBUG_REVIEW: "IN_PROGRESS" },
-  RETESTING:         { CODE_INTELLIGENCE: "DONE",        TEST_QA: "IN_PROGRESS", DEBUG_REVIEW: "DONE" },
-  FAILED:            { CODE_INTELLIGENCE: "DONE",        TEST_QA: "DONE",        DEBUG_REVIEW: "PENDING" },
-  VERIFYING:         { CODE_INTELLIGENCE: "DONE",        TEST_QA: "DONE",        DEBUG_REVIEW: "PENDING" },
-  AWAITING_APPROVAL: { CODE_INTELLIGENCE: "DONE",        TEST_QA: "DONE",        DEBUG_REVIEW: "PENDING" },
-  VERIFIED:          { CODE_INTELLIGENCE: "DONE",        TEST_QA: "DONE",        DEBUG_REVIEW: "DONE" },
-};
-
-// Human-readable reason per transition
-const DEMO_REASONS: Partial<Record<SupervisorState, string>> = {
-  RECEIVED:          "Task received, preparing decomposition",
-  PLANNING:          "Task decomposed into agent subtasks",
-  ANALYZING:         "Agents assigned: CODE_INTELLIGENCE, TEST_QA",
-  IMPLEMENTING:      "Both agents returned findings",
-  TESTING:           "Implementation complete, running tests",
-  VERIFYING:         "Tests passed (11/11), proceeding to verification",
-  AWAITING_APPROVAL: "Static analysis clean, awaiting human sign-off",
-  VERIFIED:          "Human approval granted — task complete ✓",
-};
+const POLL_INTERVAL = 2000;
 
 export function MissionControl() {
-  useParams(); // taskId — used by real API fetch; mock ignores it
+  const { taskId } = useParams<{ taskId: string }>();
   const navigate = useNavigate();
   const [activeTab, setActiveTab] = useState<"feed" | "diff">("feed");
 
-  // ── Simulation state ──────────────────────────────────────────────────────
-  const [stateIndex, setStateIndex] = useState<number>(() =>
-    DEMO_STATES.indexOf(MOCK_TASK.status)
-  );
-  const [historyEntries, setHistoryEntries] = useState<HistoryEntry[]>([
-    ...MOCK_TASK.history,
-  ]);
+  // ── Remote data state ──────────────────────────────────────────────────────
+  const [task, setTask] = useState<TaskDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [unreachable, setUnreachable] = useState(false);
 
-  const currentStatus = DEMO_STATES[stateIndex];
-  const agentStatuses = DEMO_AGENT_STATUSES[currentStatus] ?? DEMO_AGENT_STATUSES["TESTING"];
+  // ── Approval state ─────────────────────────────────────────────────────────
+  const [approving, setApproving] = useState(false);
+  const [approveError, setApproveError] = useState<string | null>(null);
 
-  const canAdvance = stateIndex < DEMO_STATES.length - 1;
-  const canReset = stateIndex > 0;
+  // Keep polling ref so we can clear it on unmount / terminal state
+  const pollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const advance = useCallback(() => {
-    if (!canAdvance) return;
-    const nextIdx = stateIndex + 1;
-    const from = DEMO_STATES[stateIndex];
-    const to = DEMO_STATES[nextIdx];
-    setHistoryEntries((prev) => [
-      ...prev,
-      {
-        from,
-        to,
-        reason: DEMO_REASONS[to] ?? `Transitioned to ${to}`,
-        timestamp: new Date().toISOString(),
-      },
-    ]);
-    setStateIndex(nextIdx);
-  }, [stateIndex, canAdvance]);
+  function stopPolling() {
+    if (pollRef.current !== null) {
+      clearTimeout(pollRef.current);
+      pollRef.current = null;
+    }
+  }
 
-  const reset = useCallback(() => {
-    setStateIndex(DEMO_STATES.indexOf("TESTING"));
-    setHistoryEntries([...MOCK_TASK.history]);
-  }, []);
+  async function fetchTask(id: string) {
+    try {
+      const data = await getTask(id);
+      setTask(data);
+      setError(null);
+      setUnreachable(false);
 
-  // Auto-advance every 4 s while still in demo (optional — only when not yet VERIFIED)
-  const [autoPlay, setAutoPlay] = useState(false);
+      if (!isTerminal(data.status)) {
+        pollRef.current = setTimeout(() => fetchTask(id), POLL_INTERVAL);
+      }
+    } catch (err) {
+      const isUnreachable = err instanceof ApiError && err.unreachable;
+      setUnreachable(isUnreachable);
+      setError(
+        isUnreachable
+          ? "Backend not reachable — make sure the server is running on port 3001."
+          : err instanceof Error
+          ? err.message
+          : "Failed to load task.",
+      );
+      // Retry even on error so the page recovers when the backend comes back
+      pollRef.current = setTimeout(() => fetchTask(id!), POLL_INTERVAL);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function handleApprove() {
+    if (!taskId || approving) return;
+    setApproving(true);
+    setApproveError(null);
+    try {
+      await approveTask(taskId);
+      // Kick off a fresh fetch; polling will resume from there
+      stopPolling();
+      await fetchTask(taskId);
+    } catch (err) {
+      setApproveError(
+        err instanceof Error ? err.message : "Approval request failed.",
+      );
+    } finally {
+      setApproving(false);
+    }
+  }
+
   useEffect(() => {
-    if (!autoPlay || !canAdvance) return;
-    const t = setTimeout(advance, 4000);
-    return () => clearTimeout(t);
-  }, [autoPlay, advance, canAdvance]);
+    if (!taskId) return;
+    fetchTask(taskId);
+    return () => stopPolling();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [taskId]);
 
-  // ── Derived values ─────────────────────────────────────────────────────────
-  const stage: WorkflowStage = supervisorStateToStage(currentStatus);
+  // ── Loading skeleton ───────────────────────────────────────────────────────
+  if (loading) {
+    return (
+      <div className="max-w-7xl mx-auto px-6 py-8 flex items-center justify-center h-64">
+        <div className="flex items-center gap-3 text-white/40">
+          <Loader2 className="w-5 h-5 animate-spin" />
+          <span className="text-[14px]">Loading task…</span>
+        </div>
+      </div>
+    );
+  }
 
-  const ciResult = MOCK_TASK.agentResults["CODE_INTELLIGENCE"];
-  const filesChanged = ciResult?.findings.affectedFiles.length ?? 0;
+  // ── Error / unreachable banner (task not loaded at all) ────────────────────
+  if (!task) {
+    return (
+      <div className="max-w-7xl mx-auto px-6 py-8">
+        <div className="flex items-start gap-3 px-5 py-4 rounded-xl border border-red-500/25 bg-red-500/[0.07] text-red-300">
+          <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="text-[13px] font-semibold">
+              {unreachable ? "Backend not reachable" : "Failed to load task"}
+            </p>
+            <p className="text-[12px] text-red-300/70">{error}</p>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
-  // Build activity feed from the accumulated history
-  const feedEntries = historyToActivityEntries(historyEntries) as RichActivityEntry[];
+  // ── Derived values (task is loaded) ───────────────────────────────────────
+  const stage: WorkflowStage = supervisorStateToStage(task.status);
+  const agentStatuses = task.agentStatus ?? {};
 
-  // Latest history entry for supervisor status display
-  const latestHistory = historyEntries[historyEntries.length - 1];
+  const ciResult = task.agentResults?.["CODE_INTELLIGENCE"];
+  const filesChanged = ciResult?.findings?.affectedFiles?.length ?? 0;
+
+  // Derive test counts from evidence-like data; fallback to "—" until testing stage
+  const testingStarted =
+    task.status === "TESTING" ||
+    task.status === "RETESTING" ||
+    task.status === "RECOVERING" ||
+    task.status === "VERIFYING" ||
+    task.status === "AWAITING_APPROVAL" ||
+    task.status === "VERIFIED";
+  const testsPassed =
+    task.status === "VERIFYING" ||
+    task.status === "AWAITING_APPROVAL" ||
+    task.status === "VERIFIED";
+
+  const feedEntries = historyToActivityEntries(task.history ?? []) as RichActivityEntry[];
+  const latestHistory = task.history?.[task.history.length - 1];
+
+  const isFailed = task.status === "FAILED";
 
   return (
     <div className="max-w-7xl mx-auto px-6 py-8 space-y-8">
+      {/* Non-blocking error banner (polling error while task is displayed) */}
+      {error && (
+        <div className="flex items-center gap-2.5 px-4 py-3 rounded-xl border border-red-500/25 bg-red-500/[0.07] text-[12px] text-red-300">
+          <AlertCircle className="w-4 h-4 shrink-0" />
+          <span>{error}</span>
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-start justify-between gap-4">
         <div className="space-y-1.5">
           <div className="flex items-center gap-2 text-[11px] text-white/30">
             <span>Task</span>
             <ChevronRight className="w-3 h-3" />
-            <span className="font-mono text-white/50">{MOCK_TASK.taskId}</span>
+            <span className="font-mono text-white/50">{task.taskId}</span>
           </div>
-          <h1 className="text-xl font-bold text-white/90">{MOCK_TASK.goal}</h1>
+          <h1 className="text-xl font-bold text-white/90">{task.goal}</h1>
         </div>
         <div className="flex items-center gap-3 shrink-0">
-          <StatusBadge variant={currentStatus} dot />
+          <StatusBadge variant={task.status} dot />
           <button
-            onClick={() => navigate(`/evidence/${MOCK_TASK.taskId}`)}
+            onClick={() => navigate(`/evidence/${task.taskId}`)}
             className="flex items-center gap-1.5 px-3 py-2 rounded-lg bg-white/[0.04] border border-white/[0.07] text-[12px] text-white/50 hover:text-white/80 hover:bg-white/[0.07] transition-all"
           >
             View Evidence
@@ -152,44 +193,67 @@ export function MissionControl() {
         </div>
       </div>
 
+      {/* AWAITING_APPROVAL — human approval banner */}
+      {task.status === "AWAITING_APPROVAL" && (
+        <div className="flex items-center justify-between gap-4 px-5 py-4 rounded-xl border border-amber-500/30 bg-amber-500/[0.07]">
+          <div className="flex items-start gap-3">
+            <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
+            <div>
+              <p className="text-[13px] font-semibold text-amber-300">Human approval required</p>
+              <p className="text-[12px] text-amber-300/60 mt-0.5">
+                All agents have completed successfully. Review the activity feed and code diff, then approve to mark this task as verified.
+              </p>
+              {approveError && (
+                <p className="flex items-center gap-1.5 text-[12px] text-red-300 mt-2">
+                  <AlertCircle className="w-3.5 h-3.5 shrink-0" />
+                  {approveError}
+                </p>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={handleApprove}
+            disabled={approving}
+            className="flex items-center gap-2 shrink-0 px-4 py-2.5 rounded-lg bg-amber-500 hover:bg-amber-400 disabled:opacity-60 disabled:cursor-not-allowed text-[12px] font-semibold text-black transition-colors"
+          >
+            {approving ? (
+              <>
+                <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                Approving…
+              </>
+            ) : (
+              "Request Human Approval"
+            )}
+          </button>
+        </div>
+      )}
+
+      {/* FAILED terminal message */}
+      {isFailed && (
+        <div className="flex items-start gap-3 px-5 py-4 rounded-xl border border-red-500/25 bg-red-500/[0.06]">
+          <XCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+          <div>
+            <p className="text-[13px] font-semibold text-red-300">Task failed</p>
+            <p className="text-[12px] text-red-300/70 mt-0.5">
+              {latestHistory?.reason ?? "The agents were unable to complete this task. Review the activity feed for details."}
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Workflow Timeline */}
       <div className="rounded-xl border border-white/[0.07] bg-[#111318] p-6">
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-[10px] tracking-widest text-white/25 uppercase font-semibold">
             Workflow Progress
           </h2>
-          {/* Demo controls */}
-          <div className="flex items-center gap-2">
-            <span className="text-[10px] text-white/20 mr-1">demo</span>
-            <button
-              onClick={reset}
-              disabled={!canReset}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-white/[0.04] border border-white/[0.07] text-[11px] text-white/40 hover:text-white/70 hover:bg-white/[0.07] transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              <RotateCcw className="w-3 h-3" />
-              Reset
-            </button>
-            <button
-              onClick={() => setAutoPlay((v) => !v)}
-              disabled={!canAdvance}
-              className={`flex items-center gap-1 px-2.5 py-1 rounded-md border text-[11px] transition-all disabled:opacity-30 disabled:cursor-not-allowed ${
-                autoPlay
-                  ? "bg-indigo-500/20 border-indigo-500/40 text-indigo-300"
-                  : "bg-white/[0.04] border-white/[0.07] text-white/40 hover:text-white/70 hover:bg-white/[0.07]"
-              }`}
-            >
-              <Play className="w-3 h-3" />
-              {autoPlay ? "Playing…" : "Auto"}
-            </button>
-            <button
-              onClick={advance}
-              disabled={!canAdvance}
-              className="flex items-center gap-1 px-2.5 py-1 rounded-md bg-indigo-500/15 border border-indigo-500/30 text-[11px] text-indigo-300 hover:bg-indigo-500/25 transition-all disabled:opacity-30 disabled:cursor-not-allowed"
-            >
-              Next Stage
-              <ArrowRight className="w-3 h-3" />
-            </button>
-          </div>
+          {/* Live polling indicator */}
+          {!isTerminal(task.status) && (
+            <div className="flex items-center gap-1.5 text-[10px] text-white/25">
+              <span className="w-1.5 h-1.5 rounded-full bg-indigo-400 animate-pulse" />
+              Live
+            </div>
+          )}
         </div>
         <WorkflowTimeline currentStage={stage} />
       </div>
@@ -206,9 +270,8 @@ export function MissionControl() {
             if (!meta) return null;
             const uiStatus = toAgentStatus(runStatus);
             const agent = { ...meta, status: uiStatus };
-            // Only pass result when agent is DONE
             const agentResult =
-              runStatus === "DONE" ? MOCK_TASK.agentResults[agentId] : null;
+              runStatus === "DONE" ? (task.agentResults?.[agentId] ?? null) : null;
             return (
               <AgentCard
                 key={agentId}
@@ -219,6 +282,9 @@ export function MissionControl() {
               />
             );
           })}
+          {Object.keys(agentStatuses).length === 0 && (
+            <p className="text-[12px] text-white/25 italic">No agents assigned yet.</p>
+          )}
         </div>
 
         {/* Right: Stats + Feed */}
@@ -234,25 +300,29 @@ export function MissionControl() {
             <StatCard
               icon={<FlaskConical className="w-4 h-4 text-cyan-400" />}
               label="Tests Run"
-              value={stateIndex >= DEMO_STATES.indexOf("TESTING") ? "11" : "—"}
+              value={testingStarted ? "—" : "—"}
               color="cyan"
             />
             <StatCard
               icon={<CheckCircle2 className="w-4 h-4 text-emerald-400" />}
               label="Tests Passed"
-              value={stateIndex >= DEMO_STATES.indexOf("VERIFYING") ? "11" : "—"}
+              value={testsPassed ? "—" : "—"}
               color="emerald"
             />
             <div className="rounded-xl border border-white/[0.07] bg-[#111318] p-4 flex flex-col items-center justify-center gap-1">
-              <RiskGauge level={MOCK_TASK.risk ?? "MEDIUM"} showLabel />
+              <RiskGauge level={task.risk ?? "MEDIUM"} showLabel />
             </div>
           </div>
 
           {/* Supervisor Status */}
-          <div className="rounded-xl border border-indigo-500/20 bg-indigo-500/[0.04] p-4">
+          <div className={`rounded-xl border p-4 ${
+            isFailed
+              ? "border-red-500/20 bg-red-500/[0.04]"
+              : "border-indigo-500/20 bg-indigo-500/[0.04]"
+          }`}>
             <div className="flex items-center gap-2 mb-2">
-              <AlertTriangle className="w-4 h-4 text-indigo-400" />
-              <span className="text-[11px] font-semibold text-indigo-300 tracking-wide">
+              <AlertTriangle className={`w-4 h-4 ${isFailed ? "text-red-400" : "text-indigo-400"}`} />
+              <span className={`text-[11px] font-semibold tracking-wide ${isFailed ? "text-red-300" : "text-indigo-300"}`}>
                 SUPERVISOR STATUS
               </span>
             </div>
@@ -262,7 +332,7 @@ export function MissionControl() {
             <div className="flex items-center gap-2 mt-2">
               <Clock className="w-3.5 h-3.5 text-white/25" />
               <span className="text-[11px] text-white/30">
-                Stage: {stage} · State: {currentStatus} · Retries: {MOCK_TASK.retryCount}/{MOCK_TASK.maxRetries}
+                Stage: {stage} · State: {task.status} · Retries: {task.retryCount}/{task.maxRetries}
               </span>
             </div>
           </div>
