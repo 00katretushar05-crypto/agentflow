@@ -756,67 +756,28 @@ Bob's awareness of the `AGENTS.md` workspace rules ensured that architectural co
 
 
 
-\## 12. Screenshots
+## 12. Screenshots
 
 
+### Command Center — Task Submission
+AgentFlow's landing page where a task goal is entered and dispatched to the multi-agent pipeline.
+![Command Center](bob_sessions/01_initial_plan_M3.png)
 
-\### Live Dashboard (deployed)
+### Mission Control — Live Workflow Tracking
+Real-time view of a task moving through Planning → Analyzing → Implementing → Testing → Verification → Approval, with live agent status, risk score, and files/tests metrics.
+![Mission Control](bob_sessions/03_bob_agent_mode_task_planning_M3.png)
 
+### Evidence Ledger — Audit Trail
+Full verification checklist (7/7 passed) with evidence score, test results, and risk assessment for a completed task.
+![Evidence Ledger](bob_sessions/10_bob_agent_mode_evidence_crash_fix_M3.png)
 
+### Agent Network — System Topology
+Visual map of the Supervisor and its agents (Code Intelligence, Test QA, Debug Review), showing live status, model assignments, and network health metrics.
+![Agent Network](bob_sessions/12_bob_agent_mode_agent_network_rebuild_M3.png)
 
-\*\*Command Center\*\* — the entry point where a developer describes the task:
-
-!\[Command Center](bob\_sessions/dashboard\_01\_command\_center.png)
-
-
-
-\*\*Mission Control\*\* — live workflow progress across all six pipeline stages, active agent status, and risk score:
-
-!\[Mission Control](bob\_sessions/dashboard\_02\_mission\_control.png)
-
-
-
-\*\*Evidence Ledger\*\* — the full verification checklist backing a `VERIFIED` result:
-
-!\[Evidence Ledger](bob\_sessions/dashboard\_03\_evidence\_ledger.png)
-
-
-
-\*\*Agent Network\*\* — visual topology of the Supervisor and its three agents, with live health metrics:
-
-!\[Agent Network](bob\_sessions/dashboard\_04\_agent\_network.png)
-
-
-
-\*\*Task History\*\* — completed and in-progress tasks across the system:
-
-!\[Task History](bob\_sessions/dashboard\_05\_task\_history.png)
-
-
-
-\### Development Process
-
-
-
-The `bob\_sessions/` directory also contains screenshots from key development moments:
-
-
-
-!\[Initial Plan](bob\_sessions/01\_initial\_plan.png)
-
-!\[Project Context](bob\_sessions/02\_project\_context.png)
-
-!\[Supervisor Implementation](bob\_sessions/03\_supervisor\_implementation.png)
-
-!\[Test Execution](bob\_sessions/03\_test\_execution.png)
-
-!\[Failure Detected](bob\_sessions/04\_failure\_detected.png)
-
-!\[Parallel Agents](bob\_sessions/04\_parallel\_agents.png.png)
-
-!\[Root Cause Analysis](bob\_sessions/05\_root\_cause.png)
-
-!\[Agents Scaffold](bob\_sessions/m2\_agents\_scaffold.png.png)
+### Task History
+List of all submitted tasks with status (Verified, Awaiting Approval, Failed) and quick filtering.
+![Task History](bob_sessions/09_bob_agent_mode_approval_button_M3.png)
 
 
 
@@ -867,6 +828,7 @@ The `bob\_sessions/` directory also contains screenshots from key development mo
 \- \*\*Real authentication\*\* — add API key or OAuth 2.0 protection to the `/approve` endpoint so the human-approval gate is tied to an identity.
 
 \- \*\*Multi-repository support\*\* — parameterise the target codebase path so AgentFlow can orchestrate changes across any repository, not just the bundled ecommerce-demo.
+
 
 
 
