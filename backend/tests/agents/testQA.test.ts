@@ -6,10 +6,10 @@
  * Strategy: the agent runs real Jest against ecommerce-demo (which has the
  * intentional bug), so we can assert on the actual live results.
  */
-import { describe, test, expect, beforeEach, afterAll } from 'vitest';
+import { describe, test, expect, beforeEach, afterAll, afterEach } from 'vitest';
 import * as path from 'path';
 import * as fs from 'fs';
-import { runTestQA } from '../../src/agents/testQA.js';
+import { runTestQA, _io, JEST_EXEC_FAILURE_SENTINEL } from '../../src/agents/testQA.js';
 import type { AgentTask } from '../../src/types/contracts';
 
 const CHECKOUT_JS = path.resolve(
@@ -280,5 +280,117 @@ describe('runTestQA', () => {
     expect(files).toContain('checkout.test.js');
     expect(files).toContain('discount.test.js');
     expect(files).toContain('order.test.js');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// runJest() execution-failure hardening
+// ---------------------------------------------------------------------------
+
+describe('runTestQA — execution failure scenarios', () => {
+  // Save the real implementations so we can restore them after each test.
+  // We override _io (the injectable layer) directly — this avoids trying to
+  // spy on sealed Node built-in module exports, which Vitest cannot patch
+  // in an ESM context.
+  const realExistsSync = _io.existsSync;
+  const realExecSync = _io.execSync;
+
+  afterEach(() => {
+    _io.existsSync = realExistsSync;
+    _io.execSync = realExecSync;
+  });
+
+  function makeTask(goal: string): AgentTask {
+    return {
+      taskId: 'exec-fail-test',
+      agent: 'TEST_QA',
+      goal,
+      assignedAt: new Date().toISOString(),
+    };
+  }
+
+  // -------------------------------------------------------------------------
+  // (a) Missing node_modules — jest binary does not exist
+  // -------------------------------------------------------------------------
+
+  test('returns FAILURE when ecommerce-demo/node_modules is missing', async () => {
+    // Make existsSync return false for the jest binary path so the agent
+    // behaves as if node_modules has never been installed.
+    _io.existsSync = (p: fs.PathLike) => {
+      if (typeof p === 'string' && p.includes('node_modules') && p.includes('jest.js')) {
+        return false;
+      }
+      return realExistsSync(p);
+    };
+
+    const result = await runTestQA(makeTask('rate limiting'));
+
+    expect(result.status).toBe('FAILURE');
+    expect(result.testResult).toBeDefined();
+    // Sentinel value must distinguish this from a real zero-test run.
+    expect(result.testResult!.totalTests).toBe(JEST_EXEC_FAILURE_SENTINEL);
+    // The message must tell the developer exactly what to do.
+    expect(result.recommendedNextAction).toMatch(/npm install/i);
+    expect(result.recommendedNextAction).toMatch(/ecommerce-demo/i);
+    // Must not claim high confidence when nothing ran.
+    expect(result.confidence).toBe('LOW');
+  });
+
+  // -------------------------------------------------------------------------
+  // (b) Jest process fails to execute (non-zero exit, no stdout)
+  // -------------------------------------------------------------------------
+
+  test('returns FAILURE when Jest process exits non-zero with no output', async () => {
+    // Override execSync to throw the shape that Node's child_process produces
+    // on non-zero exit with empty stdout — simulates a process crash before
+    // Jest could write any JSON output.
+    _io.execSync = () => {
+      const err = Object.assign(
+        new Error('Command failed: node jest.js --json --no-coverage'),
+        {
+          stdout: '',
+          stderr: "Error: Cannot find module 'jest-circus/runner'",
+          status: 1,
+        },
+      );
+      throw err;
+    };
+
+    const result = await runTestQA(makeTask('rate limiting'));
+
+    expect(result.status).toBe('FAILURE');
+    expect(result.testResult).toBeDefined();
+    // Sentinel value — not zero, not a real test count.
+    expect(result.testResult!.totalTests).toBe(JEST_EXEC_FAILURE_SENTINEL);
+    // Message must mention Jest failing, not silently pass.
+    expect(result.recommendedNextAction).toMatch(/jest/i);
+    expect(result.recommendedNextAction).toMatch(/fail/i);
+    expect(result.confidence).toBe('LOW');
+  });
+
+  // -------------------------------------------------------------------------
+  // Sanity: neither failure scenario should look like "all tests passed"
+  // -------------------------------------------------------------------------
+
+  test('neither failure case returns totalTests === 0 (avoids false "all passed")', async () => {
+    // Scenario A: missing node_modules
+    _io.existsSync = (p: fs.PathLike) => {
+      if (typeof p === 'string' && p.includes('node_modules') && p.includes('jest.js')) {
+        return false;
+      }
+      return realExistsSync(p);
+    };
+
+    const resultA = await runTestQA(makeTask('sanity check'));
+    expect(resultA.testResult!.totalTests).not.toBe(0);
+    _io.existsSync = realExistsSync; // restore before scenario B
+
+    // Scenario B: process crash / empty stdout
+    _io.execSync = () => {
+      throw Object.assign(new Error('Command failed'), { stdout: '', stderr: '', status: 1 });
+    };
+
+    const resultB = await runTestQA(makeTask('sanity check'));
+    expect(resultB.testResult!.totalTests).not.toBe(0);
   });
 });
