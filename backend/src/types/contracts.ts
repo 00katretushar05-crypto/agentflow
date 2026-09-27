@@ -161,8 +161,52 @@ export interface SupervisorTaskState {
     score: number;
     recommendation: string;
   };
+  /**
+   * Execution metrics derived from actual run data.
+   * Built on-demand by buildMetrics(); never written by hand.
+   */
+  metrics?: TaskMetrics;
+  /**
+   * Cumulative count of tests run across ALL TEST_QA dispatches.
+   * Used by buildMetrics() to compute testsExecuted accurately even when
+   * agentResults only retains the most-recent TEST_QA result.
+   * @internal Not part of the public API response — filtered out by the route.
+   */
+  _testsExecutedTotal?: number;
+  /**
+   * Cumulative count of test failures across ALL TEST_QA dispatches.
+   * @internal Not part of the public API response — filtered out by the route.
+   */
+  _failuresDetectedTotal?: number;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Execution metrics for a completed (or in-progress) supervised task.
+ * Every field is derived from actual execution data — no invented numbers.
+ *
+ * Populated by buildMetrics() in evidenceLedger.ts and exposed as
+ * SupervisorTaskState.metrics on GET /api/task/:id.
+ */
+export interface TaskMetrics {
+  /** Number of state transitions recorded in history (one per applyTransition call). */
+  coordinationSteps: number;
+  /** Number of times a human explicitly approved the task (0 or 1 per run). */
+  manualInterventions: number;
+  /** Number of distinct agent dispatches (one per runAgent/storeResult call). */
+  contextSwitches: number;
+  /** Cumulative total tests executed across all TEST_QA agent runs. */
+  testsExecuted: number;
+  /** Cumulative test failures detected across all TEST_QA agent runs. */
+  failuresDetected: number;
+  /** Number of FAILED → RECOVERING cycles (equals state.retryCount). */
+  recoveryAttempts: number;
+  /**
+   * Wall-clock milliseconds from task creation to VERIFIED state.
+   * Null when the task has not yet reached VERIFIED.
+   */
+  timeToVerifiedMs: number | null;
 }
 
 /**
@@ -183,7 +227,6 @@ export interface RiskAssessment {
   /** One-sentence human-readable recommendation based on riskPercent thresholds. */
   recommendation: string;
 }
-
 /** Standard error shape for every API error response — keeps error handling consistent across all routes. */
 export interface ApiError {
   error: string;

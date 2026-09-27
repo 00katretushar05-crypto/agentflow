@@ -23,6 +23,7 @@ import {
   getAllRunStates,
   approveSupervisorTask,
   buildLedgerSummary,
+  buildMetrics,
 } from '../supervisor.js';
 
 export const apiRouter = Router();
@@ -72,7 +73,12 @@ apiRouter.get('/task/:id', (req: Request, res: Response) => {
     return;
   }
 
-  res.json({ data: state });
+  // Strip internal accumulator fields (_testsExecutedTotal, _failuresDetectedTotal)
+  // before sending — they are @internal bookkeeping used only by buildMetrics().
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  const { _testsExecutedTotal, _failuresDetectedTotal, ...publicState } = state;
+
+  res.json({ data: { ...publicState, metrics: buildMetrics(state) } });
 });
 
 // ---------------------------------------------------------------------------

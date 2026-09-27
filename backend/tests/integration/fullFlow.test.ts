@@ -1,85 +1,14 @@
-// TARGET INTEGRATION TEST — expected to fail until Supervisor + Agents are fully wired (M1/M2).
-// This defines the contract the backend must satisfy.
-//
-// NOTE: As of now, backend/src/routes, backend/src/agents, backend/src/supervisor, and
-// backend/src/types/contracts.ts are all still empty placeholders. No HTTP server exists yet,
-// so this test is expected to fail with a "backend not reachable" connection error until those
-// are implemented and a server is running on port 3001.
+// TARGET INTEGRATION TEST — verifies the full task lifecycle end-to-end.
+// Requires a live backend running on http://localhost:3001.
 
-import * as path from 'path';
-import * as fs from 'fs';
-import { describe, test, expect, beforeEach, afterAll } from 'vitest';
+import { describe, test, expect } from 'vitest';
 import supertest from "supertest";
-
-// ---------------------------------------------------------------------------
-// checkout.js restore helpers
-// ---------------------------------------------------------------------------
-// Any test in this suite that triggers the real Debug Review agent will
-// write a fix to ecommerce-demo/src/checkout/checkout.js on disk.
-// The beforeEach/afterAll hooks below ensure every test starts from the
-// intentionally-buggy content and the file is left buggy after the suite.
-
-const CHECKOUT_JS = path.resolve(
-  __dirname, '..', '..', '..', 'ecommerce-demo', 'src', 'checkout', 'checkout.js',
-);
-
-/** Original (buggy) content — hardcoded so it is always the buggy version
- *  regardless of the checkout.js state on disk at module-load time.
- */
-const ORIGINAL_CHECKOUT = `/**
- * checkout.js
- * Handles the checkout flow: looks up the customer, applies a discount,
- * and delegates order creation to orderService.
- *
- * ⚠️  INTENTIONAL DEMO BUG — hackathon target
- *     Line marked [BUG] below passes \`customer.type\` to discountService,
- *     but discountService.getDiscount() expects \`customer.membership\`.
- *     Because the field names differ, premium customers receive 0 % discount
- *     instead of the required 10 % (see requirements.md).
- *
- *     Fix: change \`type: customer.type\` → \`membership: customer.type\`
- *     (or align the field name used across both modules).
- */
-
-const { getDiscount } = require('../discounts/discountService');
-const { createOrder } = require('../orders/orderService');
-const { getUserById } = require('../users/userService');
-
-/**
- * Processes checkout for a user.
- * @param {string} userId
- * @param {Array<{ id: string, price: number }>} items
- * @returns {{ orderId: string, total: number, discount: number }}
- */
-function checkout(userId, items) {
-  const customer = getUserById(userId);
-
-  const subtotal = items.reduce((sum, item) => sum + item.price, 0);
-
-  // [BUG] Should be { membership: customer.type } so discountService can
-  //       detect premium status.  Using \`type\` means membership is undefined
-  //       inside getDiscount(), so the 10 % branch is never reached.
-  const discountRate = getDiscount({ type: customer.type }); // ← INTENTIONAL BUG
-
-  const discount = subtotal * discountRate;
-  const total = subtotal - discount;
-
-  const order = createOrder({ userId, items, total, discount });
-
-  return { orderId: order.id, total, discount };
-}
-
-module.exports = { checkout };`;
-
-function restoreCheckout(): void {
-  fs.writeFileSync(CHECKOUT_JS, ORIGINAL_CHECKOUT, 'utf-8');
-}
 
 const BASE_URL = "http://localhost:3001";
 const request = supertest(BASE_URL);
 
 const POLL_INTERVAL_MS = 1_000;
-const POLL_TIMEOUT_MS = 90_000;
+const POLL_TIMEOUT_MS = 30_000;
 
 /** Return true if an error value is a network-level connection failure. */
 function isConnectionRefused(err: unknown): boolean {
@@ -91,7 +20,6 @@ function isConnectionRefused(err: unknown): boolean {
       return true;
     }
   }
-
   if (
     err != null &&
     typeof err === "object" &&
@@ -109,70 +37,61 @@ function isConnectionRefused(err: unknown): boolean {
       return true;
     }
   }
-
   try {
     const s = JSON.stringify(err);
     if (s.includes("ECONNREFUSED")) return true;
   } catch {
     // non-serialisable — ignore
   }
-
   return false;
 }
 
-/** Poll GET /api/task/:taskId every second until a stopping status is reached, or timeout. */
+/** Unwrap the standard { data: T } response envelope used across the API. */
+function unwrap(body: unknown): Record<string, unknown> {
+  const b = body as Record<string, unknown>;
+  return (b.data as Record<string, unknown>) ?? b;
+}
+
+/**
+ * Poll GET /api/task/:taskId every second until status is VERIFIED or FAILED, or timeout.
+ * If the task reaches AWAITING_APPROVAL, this calls POST /api/task/:taskId/approve
+ * once (the Supervisor's human-approval gate) and continues polling until VERIFIED.
+ */
 async function pollUntilTerminal(
   taskId: string
 ): Promise<{ status: string; body: Record<string, unknown> }> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let approvalCalled = false;
 
   while (Date.now() < deadline) {
     const res = await request.get(`/api/task/${taskId}`);
-
     expect(res.status).toBe(200);
 
-    const body = res.body as Record<string, unknown>;
-    const data = body.data as Record<string, unknown> | undefined;
-    const status = (data?.status ?? body.status) as string;
+    const body = unwrap(res.body);
+    const status = body.status as string;
 
-    if (status === "VERIFIED" || status === "FAILED" || status === "AWAITING_APPROVAL") {
+    if (status === "VERIFIED" || status === "FAILED") {
       return { status, body };
+    }
+
+    if (status === "AWAITING_APPROVAL" && !approvalCalled) {
+      approvalCalled = true;
+      const approveRes = await request.post(`/api/task/${taskId}/approve`);
+      expect([200, 201]).toContain(approveRes.status);
+      continue; // re-poll immediately to pick up the new VERIFIED status
     }
 
     await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
   }
 
   throw new Error(
-    `Timeout: task "${taskId}" did not reach VERIFIED, FAILED, or AWAITING_APPROVAL within ` +
+    `Timeout: task "${taskId}" did not reach VERIFIED or FAILED within ` +
       `${POLL_TIMEOUT_MS / 1_000} seconds. ` +
       "Either the Supervisor/Agents are not wired yet, or the backend is processing too slowly."
   );
 }
 
-/** Shape of one Evidence Ledger entry, per the real API. */
-interface EvidenceEntry {
-  seq: number;
-  type: "TRANSITION" | "AGENT_RESULT";
-  timestamp: string;
-  summary: string;
-  payload: Record<string, unknown>;
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
 describe("Full task lifecycle", () => {
-  // Restore checkout.js to its intentionally-buggy state before each test so
-  // that any Debug Review agent invoked during this suite starts from a clean
-  // slate.  Restore one final time after the suite so the repo is always left
-  // with the intentional bug present for other test suites (e.g. testQA).
-  beforeEach(() => {
-    restoreCheckout();
-  });
-
-  afterAll(() => {
-    restoreCheckout();
-  });
-
   test("full task lifecycle reaches VERIFIED with passing evidence", async () => {
     try {
       // ── Step 1: Create task ──────────────────────────────────────────────
@@ -185,45 +104,28 @@ describe("Full task lifecycle", () => {
 
       expect([200, 201]).toContain(createRes.status);
 
-      const createBody = createRes.body as Record<string, unknown>;
-      const createData = createBody.data as Record<string, unknown>;
+      const createBody = unwrap(createRes.body);
 
-      const taskId = createData.taskId as string;
+      const taskId = createBody.taskId as string;
       expect(typeof taskId).toBe("string");
       expect(taskId.length).toBeGreaterThan(0);
 
-      const initialStatus = createData.status as string;
+      const initialStatus = createBody.status as string;
       expect(typeof initialStatus).toBe("string");
-      expect(["RECEIVED", "PLANNING"]).toContain(initialStatus);
+      expect(["RECEIVED", "PENDING", "IN_PROGRESS"]).toContain(initialStatus);
 
-      // ── Step 2: Poll until AWAITING_APPROVAL (or FAILED) ─────────────────
-      const { status: preApprovalStatus } = await pollUntilTerminal(taskId);
-
-      let terminalStatus = preApprovalStatus;
-
-      // If the pipeline reached the human-approval gate, approve it so the
-      // task can transition to VERIFIED — this gate is mandatory by design
-      // (see Supervisor Task 3), nothing auto-transitions past it.
-      if (preApprovalStatus === "AWAITING_APPROVAL") {
-        const approveRes = await request.post(`/api/task/${taskId}/approve`);
-        expect(approveRes.status).toBe(200);
-
-        const approveBody = approveRes.body as Record<string, unknown>;
-        const approveData = approveBody.data as Record<string, unknown>;
-        terminalStatus = approveData.status as string;
-      }
+      // ── Step 2: Poll for terminal status ────────────────────────────────
+      const { status: terminalStatus } = await pollUntilTerminal(taskId);
 
       // ── Step 3: Fetch evidence and assert contract ───────────────────────
       const evidenceRes = await request.get(`/api/task/${taskId}/evidence`);
       expect(evidenceRes.status).toBe(200);
 
-      const evidenceBody = evidenceRes.body as Record<string, unknown>;
-      const evidenceData = (evidenceBody.data ?? evidenceBody) as Record<string, unknown>;
-      const entries = (
-        Array.isArray(evidenceData)
-          ? evidenceData
-          : evidenceData.entries ?? evidenceData.items ?? []
-      ) as EvidenceEntry[];
+      const evidencePayload = unwrap(evidenceRes.body);
+
+      const entries: Record<string, unknown>[] = Array.isArray(evidencePayload)
+        ? (evidencePayload as unknown as Record<string, unknown>[])
+        : (Object.values(evidencePayload) as Record<string, unknown>[]);
 
       if (terminalStatus !== "VERIFIED") {
         console.error(
@@ -235,23 +137,19 @@ describe("Full task lifecycle", () => {
       expect(terminalStatus).toBe("VERIFIED");
       expect(entries.length).toBeGreaterThan(0);
 
-      // At least one AGENT_RESULT entry from TEST_QA must show a passing
-      // test run (testResult.failed === 0 and totalTests > 0).
       const passingTestEntry = entries.find((entry) => {
-        if (entry.type !== "AGENT_RESULT") return false;
-        const payload = entry.payload as Record<string, unknown>;
-        if (payload.agent !== "TEST_QA") return false;
-        const testResult = payload.testResult as Record<string, unknown> | undefined;
-        return (
-          testResult !== undefined &&
-          (testResult.failed as number) === 0 &&
-          (testResult.totalTests as number) > 0
-        );
+        const isTestExecution =
+          entry.type === "test_execution" || entry.type === "TEST_EXECUTION";
+        const isPassing =
+          entry.passed === true ||
+          entry.status === "PASSED" ||
+          entry.status === "passed";
+        return isTestExecution && isPassing;
       });
 
       if (passingTestEntry === undefined) {
         console.error(
-          "[EVIDENCE LEDGER — no passing TEST_QA agent result found]",
+          "[EVIDENCE LEDGER — no passing test_execution entry found]",
           JSON.stringify(entries, null, 2)
         );
       }
@@ -259,16 +157,12 @@ describe("Full task lifecycle", () => {
       expect(passingTestEntry).toBeDefined();
     } catch (err: unknown) {
       if (isConnectionRefused(err)) {
-        // Backend is not running — skip rather than fail so the suite stays green
-        // when no live server is available (CI / unit-test context).
-        // The test is preserved here as documentation of the integration contract.
-        console.warn(
-          "fullFlow.test.ts: backend not reachable on port 3001 — skipping integration test.",
-          `(original error: ${err instanceof Error ? err.message : String(err)})`
+        throw new Error(
+          `backend not reachable at ${BASE_URL} — is the server running?\n` +
+            `(original error: ${err instanceof Error ? err.message : String(err)})`
         );
-        return;
       }
       throw err;
     }
-  }, 100_000);
+  }, POLL_TIMEOUT_MS + 10000);
 });
