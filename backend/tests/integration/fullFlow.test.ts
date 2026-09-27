@@ -1,15 +1,10 @@
-// TARGET INTEGRATION TEST — expected to fail until Supervisor + Agents are fully wired (M1/M2).
-// This defines the contract the backend must satisfy.
-//
-// NOTE: As of now, backend/src/routes, backend/src/agents, backend/src/supervisor, and
-// backend/src/types/contracts.ts are all still empty placeholders. No HTTP server exists yet,
-// so this test is expected to fail with a "backend not reachable" connection error until those
-// are implemented and a server is running on port 5000.
+// TARGET INTEGRATION TEST — verifies the full task lifecycle end-to-end.
+// Requires a live backend running on http://localhost:3001.
 
-import { describe, test, expect, beforeEach, afterAll } from 'vitest';
+import { describe, test, expect } from 'vitest';
 import supertest from "supertest";
 
-const BASE_URL = "http://localhost:5000";
+const BASE_URL = "http://localhost:3001";
 const request = supertest(BASE_URL);
 
 const POLL_INTERVAL_MS = 1_000;
@@ -17,7 +12,6 @@ const POLL_TIMEOUT_MS = 30_000;
 
 /** Return true if an error value is a network-level connection failure. */
 function isConnectionRefused(err: unknown): boolean {
-  // Plain Error: message contains ECONNREFUSED or socket hang up
   if (err instanceof Error) {
     if (
       err.message.includes("ECONNREFUSED") ||
@@ -26,8 +20,6 @@ function isConnectionRefused(err: unknown): boolean {
       return true;
     }
   }
-
-  // Node ≥ 16 AggregateError: duck-type via the `errors` array property
   if (
     err != null &&
     typeof err === "object" &&
@@ -45,34 +37,48 @@ function isConnectionRefused(err: unknown): boolean {
       return true;
     }
   }
-
-  // Last resort: stringify and scan (catches e.g. wrapped fetch errors)
   try {
     const s = JSON.stringify(err);
     if (s.includes("ECONNREFUSED")) return true;
   } catch {
     // non-serialisable — ignore
   }
-
   return false;
 }
 
-/** Poll GET /api/task/:taskId every second until status is VERIFIED or FAILED, or timeout. */
+/** Unwrap the standard { data: T } response envelope used across the API. */
+function unwrap(body: unknown): Record<string, unknown> {
+  const b = body as Record<string, unknown>;
+  return (b.data as Record<string, unknown>) ?? b;
+}
+
+/**
+ * Poll GET /api/task/:taskId every second until status is VERIFIED or FAILED, or timeout.
+ * If the task reaches AWAITING_APPROVAL, this calls POST /api/task/:taskId/approve
+ * once (the Supervisor's human-approval gate) and continues polling until VERIFIED.
+ */
 async function pollUntilTerminal(
   taskId: string
 ): Promise<{ status: string; body: Record<string, unknown> }> {
   const deadline = Date.now() + POLL_TIMEOUT_MS;
+  let approvalCalled = false;
 
   while (Date.now() < deadline) {
     const res = await request.get(`/api/task/${taskId}`);
-
     expect(res.status).toBe(200);
 
-    const body = res.body as Record<string, unknown>;
+    const body = unwrap(res.body);
     const status = body.status as string;
 
     if (status === "VERIFIED" || status === "FAILED") {
       return { status, body };
+    }
+
+    if (status === "AWAITING_APPROVAL" && !approvalCalled) {
+      approvalCalled = true;
+      const approveRes = await request.post(`/api/task/${taskId}/approve`);
+      expect([200, 201]).toContain(approveRes.status);
+      continue; // re-poll immediately to pick up the new VERIFIED status
     }
 
     await new Promise<void>((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
@@ -84,8 +90,6 @@ async function pollUntilTerminal(
       "Either the Supervisor/Agents are not wired yet, or the backend is processing too slowly."
   );
 }
-
-// ─────────────────────────────────────────────────────────────────────────────
 
 describe("Full task lifecycle", () => {
   test("full task lifecycle reaches VERIFIED with passing evidence", async () => {
@@ -100,7 +104,7 @@ describe("Full task lifecycle", () => {
 
       expect([200, 201]).toContain(createRes.status);
 
-      const createBody = createRes.body as Record<string, unknown>;
+      const createBody = unwrap(createRes.body);
 
       const taskId = createBody.taskId as string;
       expect(typeof taskId).toBe("string");
@@ -108,7 +112,7 @@ describe("Full task lifecycle", () => {
 
       const initialStatus = createBody.status as string;
       expect(typeof initialStatus).toBe("string");
-      expect(["PENDING", "IN_PROGRESS"]).toContain(initialStatus);
+      expect(["RECEIVED", "PENDING", "IN_PROGRESS"]).toContain(initialStatus);
 
       // ── Step 2: Poll for terminal status ────────────────────────────────
       const { status: terminalStatus } = await pollUntilTerminal(taskId);
@@ -117,17 +121,13 @@ describe("Full task lifecycle", () => {
       const evidenceRes = await request.get(`/api/task/${taskId}/evidence`);
       expect(evidenceRes.status).toBe(200);
 
-      const evidencePayload = evidenceRes.body as
-        | Record<string, unknown>[]
-        | Record<string, unknown>;
+      const evidencePayload = unwrap(evidenceRes.body);
 
-      // Accept both array-form and keyed-object-form evidence ledgers.
       const entries: Record<string, unknown>[] = Array.isArray(evidencePayload)
-        ? (evidencePayload as Record<string, unknown>[])
+        ? (evidencePayload as unknown as Record<string, unknown>[])
         : (Object.values(evidencePayload) as Record<string, unknown>[]);
 
       if (terminalStatus !== "VERIFIED") {
-        // Log full ledger so the developer can see what happened.
         console.error(
           "[EVIDENCE LEDGER — task did NOT reach VERIFIED]",
           JSON.stringify(entries, null, 2)
@@ -137,17 +137,13 @@ describe("Full task lifecycle", () => {
       expect(terminalStatus).toBe("VERIFIED");
       expect(entries.length).toBeGreaterThan(0);
 
-      // At least one entry must represent a passing test-execution.
       const passingTestEntry = entries.find((entry) => {
         const isTestExecution =
-          entry.type === "test_execution" ||
-          entry.type === "TEST_EXECUTION";
-
+          entry.type === "test_execution" || entry.type === "TEST_EXECUTION";
         const isPassing =
           entry.passed === true ||
           entry.status === "PASSED" ||
           entry.status === "passed";
-
         return isTestExecution && isPassing;
       });
 
@@ -161,16 +157,12 @@ describe("Full task lifecycle", () => {
       expect(passingTestEntry).toBeDefined();
     } catch (err: unknown) {
       if (isConnectionRefused(err)) {
-        // Backend is not running — skip rather than fail so the suite stays green
-        // when no live server is available (CI / unit-test context).
-        // The test is preserved here as documentation of the integration contract.
-        console.warn(
-          "fullFlow.test.ts: backend not reachable on port 5000 — skipping integration test.",
-          `(original error: ${err instanceof Error ? err.message : String(err)})`
+        throw new Error(
+          `backend not reachable at ${BASE_URL} — is the server running?\n` +
+            `(original error: ${err instanceof Error ? err.message : String(err)})`
         );
-        return;
       }
       throw err;
     }
-  });
+  }, POLL_TIMEOUT_MS + 10000);
 });
