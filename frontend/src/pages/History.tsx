@@ -3,11 +3,14 @@ import {
   Clock,
   ChevronRight,
   Search,
+  Loader2,
+  AlertCircle,
+  RefreshCw,
 } from "lucide-react";
 import { StatusBadge } from "@/components/StatusBadge";
-import { MOCK_TASKS } from "@/data/demo";
-import type { SupervisorState } from "@/data/demo";
-import { useState } from "react";
+import type { SupervisorState, TaskSummary } from "@/data/demo";
+import { useState, useEffect } from "react";
+import { getTasks, ApiError } from "@/lib/api";
 
 const STATUS_FILTERS: Array<"ALL" | SupervisorState> = [
   "ALL",
@@ -21,7 +24,34 @@ export function History() {
   const navigate = useNavigate();
   const [filter, setFilter] = useState<string>("ALL");
 
-  const tasks = MOCK_TASKS.tasks;
+  const [tasks, setTasks] = useState<TaskSummary[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [unreachable, setUnreachable] = useState(false);
+
+  async function loadTasks() {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await getTasks();
+      setTasks(data.tasks);
+      setUnreachable(false);
+    } catch (err) {
+      const isUnreachable = err instanceof ApiError && err.unreachable;
+      setUnreachable(isUnreachable);
+      setError(
+        isUnreachable
+          ? "Backend not reachable — make sure the server is running on port 3001."
+          : err instanceof Error
+          ? err.message
+          : "Failed to load history.",
+      );
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => { loadTasks(); }, []);
 
   const filtered =
     filter === "ALL" ? tasks : tasks.filter((t) => t.status === filter);
@@ -47,6 +77,17 @@ export function History() {
     return `${Math.floor(hrs / 24)}d ago`;
   }
 
+  if (loading) {
+    return (
+      <div className="max-w-4xl mx-auto px-6 py-8 flex items-center justify-center h-64">
+        <div className="flex items-center gap-3 text-white/40">
+          <Loader2 className="w-5 h-5 animate-spin" />
+          <span className="text-[14px]">Loading history…</span>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-4xl mx-auto px-6 py-8 space-y-6">
       {/* Header */}
@@ -57,7 +98,27 @@ export function History() {
             {tasks.length} tasks total · {counts.VERIFIED} verified · {counts.FAILED} failed
           </p>
         </div>
+        <button
+          onClick={loadTasks}
+          className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-white/[0.04] border border-white/[0.06] text-[12px] text-white/35 hover:text-white/60 hover:bg-white/[0.06] transition-all"
+        >
+          <RefreshCw className="w-3.5 h-3.5" />
+          Refresh
+        </button>
       </div>
+
+      {/* Error banner */}
+      {error && (
+        <div className="flex items-start gap-3 px-4 py-3 rounded-xl border border-red-500/25 bg-red-500/[0.07] text-red-300">
+          <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+          <div className="space-y-0.5">
+            <p className="text-[12px] font-semibold">
+              {unreachable ? "Backend not reachable" : "Failed to load history"}
+            </p>
+            <p className="text-[11px] text-red-300/70">{error}</p>
+          </div>
+        </div>
+      )}
 
       {/* Summary Stats */}
       <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -102,6 +163,11 @@ export function History() {
 
       {/* Task List */}
       <div className="rounded-xl border border-white/[0.07] bg-[#111318] overflow-hidden">
+        {filtered.length === 0 && !error && (
+          <div className="px-5 py-8 text-center text-[13px] text-white/25">
+            {tasks.length === 0 ? "No tasks yet." : "No tasks match this filter."}
+          </div>
+        )}
         <div className="divide-y divide-white/[0.04]">
           {filtered.map((task) => (
             <div

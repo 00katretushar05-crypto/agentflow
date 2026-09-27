@@ -1,7 +1,8 @@
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Sparkles, Terminal, Zap, Shield, GitBranch } from "lucide-react";
+import { ArrowRight, Sparkles, Terminal, Zap, Shield, GitBranch, AlertCircle } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { createTask, ApiError } from "@/lib/api";
 
 const EXAMPLE_PROMPTS = [
   "Implement JWT authentication middleware for all /api/v2 routes",
@@ -37,13 +38,27 @@ const FEATURES = [
 export function CommandCenter() {
   const [task, setTask] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const navigate = useNavigate();
 
-  function handleStart(e: React.FormEvent) {
+  async function handleStart(e: React.FormEvent) {
     e.preventDefault();
     if (!task.trim()) return;
     setLoading(true);
-    setTimeout(() => navigate("/mission/AF-1024"), 800);
+    setError(null);
+    try {
+      const { taskId } = await createTask(task.trim());
+      navigate(`/mission/${taskId}`);
+    } catch (err) {
+      const msg =
+        err instanceof ApiError && err.unreachable
+          ? "Backend not reachable — make sure the server is running on port 3001."
+          : err instanceof Error
+          ? err.message
+          : "Unexpected error, please try again.";
+      setError(msg);
+      setLoading(false);
+    }
   }
 
   return (
@@ -78,14 +93,22 @@ export function CommandCenter() {
               value={task}
               onChange={(e) => setTask(e.target.value)}
               placeholder="What should we work on?"
+              disabled={loading}
               className={cn(
                 "w-full bg-[#111318] border border-white/[0.09] rounded-xl pl-11 pr-4 py-4",
                 "text-[14px] text-white/80 placeholder:text-white/20",
                 "focus:outline-none focus:border-indigo-500/50 focus:ring-1 focus:ring-indigo-500/30",
-                "transition-all duration-200"
+                "transition-all duration-200 disabled:opacity-50"
               )}
             />
           </div>
+
+          {error && (
+            <div className="flex items-start gap-2.5 px-4 py-3 rounded-xl border border-red-500/25 bg-red-500/[0.07] text-[12px] text-red-300">
+              <AlertCircle className="w-4 h-4 shrink-0 mt-0.5" />
+              <span>{error}</span>
+            </div>
+          )}
 
           <button
             type="submit"
