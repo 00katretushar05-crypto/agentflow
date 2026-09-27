@@ -1,186 +1,169 @@
-# AgentFlow — Architecture & Implementation Plan
+# AgentFlow — v0.1 Architecture & Implementation Plan
 
-> Version 0.1 — Working Prototype  
-> Audience: Technical evaluators deciding whether this approach is worth investing in  
-> Goal: A polished, demoable AI Supervisor for software development workflows
+## Top-Level Overview
 
----
+AgentFlow is an AI Supervisor for software development workflows. It receives a developer
+task, decomposes it, coordinates three specialised agents (Code Intelligence, Test & QA,
+Debug & Review) in parallel where possible, recovers from failures, and produces an
+evidence-backed result. The system is a working prototype that demonstrates real
+orchestration value to a technical evaluator.
 
-## Table of Contents
+**Scope:** Full-stack TypeScript — Express/Node backend, React/Vite frontend, simulated
+LLM agents (deterministic stubs that behave like real agents for demo reliability), SSE
+for real-time updates.
 
-1. [System Architecture](#1-system-architecture)
-2. [Frontend Architecture](#2-frontend-architecture)
-3. [Backend Architecture](#3-backend-architecture)
-4. [Supervisor State Machine](#4-supervisor-state-machine)
-5. [Agent Responsibilities](#5-agent-responsibilities)
-6. [Handoff Contracts](#6-handoff-contracts)
-7. [API Design](#7-api-design)
-8. [Folder Structure](#8-folder-structure)
-9. [Demo Scenario](#9-demo-scenario)
-10. [Implementation Order](#10-implementation-order)
-11. [Sub-Tasks](#11-sub-tasks)
+**Non-goals (explicit simplifications):** no auth, no DB (in-memory state), no vector
+DB, no Kafka, no Docker, no real LLM calls in the core loop (agents are stubbed with
+realistic latency), no microservices.
 
 ---
 
 ## 1. System Architecture
 
-### Overview
+### Key Decisions
 
-AgentFlow is a monorepo containing:
-- **Backend** — Node.js + TypeScript, Express, SSE for real-time updates
-- **Frontend** — React + TypeScript, Vite, TailwindCSS + shadcn/ui
-- **Shared types** — a `contracts.ts` file shared between frontend and backend via a local import
-
-### Major Decisions
-
-| Decision | Choice | Justification | Alternative Considered |
-|---|---|---|---|
-| Runtime | Node.js + Express | Familiar, minimal overhead, easy to stream SSE | Fastify is faster but adds config; Bun is fast but less stable on Windows |
-| Frontend framework | React + Vite | Most evaluators know React; Vite gives instant HMR | Next.js adds SSR complexity we don't need for a demo |
-| Styling | Tailwind CSS + shadcn/ui | Looks like a real product instantly; highly customizable | MUI/Chakra feel "template-y"; raw CSS is too slow |
-| Real-time updates | Server-Sent Events (SSE) | One-directional server→client fits the "stream of events" model; no WS upgrade needed | WebSockets add bidirectional complexity for no gain here |
-| Agent communication | In-process function calls | For a prototype, agents run in-process; no network overhead, easy to trace and debug | Message queues (BullMQ/Redis) would be correct at scale but over-engineer this |
-| AI calls | OpenAI API (GPT-4o) with structured outputs | Most reliable structured JSON output today; `zod` schema validation on every response | Anthropic, local LLM — swappable via an adapter interface |
-| State persistence | In-memory (Map) + optional JSON file flush | Zero infrastructure dependency; demo-safe | PostgreSQL is overkill; SQLite is reasonable but adds setup friction |
-| Testing | Vitest for backend unit tests | Same config as Vite, fast, TypeScript-native | Jest works but requires more config |
+| Decision | Choice | Justification |
+|---|---|---|
+| Runtime | Node 20 + TypeScript strict | Single language across stack, strong typing, fast iteration |
+| Backend framework | Express | Minimal, well-understood, no magic — easy to reason about middleware |
+| Real-time transport | Server-Sent Events (SSE) | One-directional server→client updates fit perfectly; no WS overhead for a demo |
+| State storage | In-memory Map per workflow run | Eliminates DB setup while keeping state fully inspectable; acceptable for a prototype |
+| LLM integration | Simulated agents with realistic delay | Deterministic demo + no API key dependency; real LLM calls can be swapped in later |
+| Frontend | React 18 + Vite + TailwindCSS | Fast dev, excellent CSS utility classes for achieving Linear/Vercel-level polish |
+| State management | Zustand (lightweight) | No Redux boilerplate; readable selectors; works well with SSE streaming |
+| Build | ESBuild (via Vite) | Fast cold starts critical for live demo |
 
 ### Deliberate Simplifications
 
-- **No authentication** — session is identified by a `runId` UUID; acceptable for a single-user demo
-- **No database** — all run state lives in a `RunStore` (in-memory Map); the demo never needs history across restarts
-- **Agents run in-process** — realistic orchestration logic without the operational overhead of separate services
-- **LLM calls are real but bounded** — each agent call uses a focused, short prompt; if the API is slow we can swap in a mock adapter with one flag
-- **No file system access** — code is passed as strings in the demo scenario; a real product would use git checkout
+- **In-memory state:** A production system would use Redis or Postgres. For this
+  prototype the trade-off is acceptable because (a) no horizontal scaling is needed, and
+  (b) it removes all DB setup friction during a demo.
+- **Simulated agents:** Real LLM calls introduce unpredictable latency and token cost.
+  Stubs replicate the full contract surface with controlled timing so the demo is
+  always repeatable.
+- **No auth:** Out of scope — the evaluator is looking at orchestration sophistication,
+  not login flows.
 
 ---
 
 ## 2. Frontend Architecture
-
-### Stack
-
-- **React 18** + **TypeScript** (strict)
-- **Vite** (build + dev server)
-- **TailwindCSS v3** + **shadcn/ui** (component primitives)
-- **Zustand** (lightweight global state — no Redux boilerplate for a prototype)
-- **React Query (TanStack Query v5)** (data fetching, loading/error states, cache)
-- **React Router v6** (two routes: `/` dashboard, `/runs/:runId`)
 
 ### Component Hierarchy
 
 ```
 App
 ├── Layout
-│   ├── Sidebar (nav + recent runs)
-│   └── Header (branding + status chip)
-├── DashboardPage  (route: /)
-│   ├── NewRunForm (task input, submit)
-│   └── RunHistoryList (recent runs with status badges)
-└── RunDetailPage  (route: /runs/:runId)
-    ├── RunHeader (task summary, overall status, elapsed time)
-    ├── SupervisorPanel
-    │   ├── StateBadge (current supervisor state)
-    │   └── PlanView (decomposed sub-tasks list)
-    ├── AgentLane (repeated for each agent)
-    │   ├── AgentHeader (name, status icon, pulse animation)
-    │   ├── AgentLogStream (scrolling event log, monospace)
-    │   └── AgentResultCard (structured output when done)
-    ├── EvidenceLedger (collapsible table of all evidence items)
-    └── ApprovalGate (conditional — shown only when Supervisor awaits human)
+│   ├── Sidebar (navigation, recent runs)
+│   └── TopBar (run status badge, GitHub-style breadcrumb)
+├── pages/
+│   ├── NewRunPage          — task input, decomposition preview
+│   ├── RunDetailPage       — live workflow view (primary demo screen)
+│   └── EvidenceLedgerPage  — read-only audit log for completed run
+└── components/
+    ├── TaskInput           — textarea + submit, keyboard shortcut
+    ├── PipelineView        — horizontal stage swimlane (the "wow" component)
+    │   ├── StageNode       — individual agent card with status ring
+    │   └── DependencyEdge  — animated connector between stages
+    ├── AgentCard           — detailed panel for one agent's live output
+    ├── StatusBadge         — colour-coded pill (pending/running/done/failed/recovering)
+    ├── EvidenceTable       — sortable ledger rows
+    ├── ApprovalBanner      — sticky bar requiring human sign-off
+    └── LogStream           — auto-scrolling, syntax-highlighted log panel
 ```
 
-### State Management
+### State Management (Zustand)
 
-| Concern | Solution | Why |
-|---|---|---|
-| Run list | React Query + `/api/runs` | Cache + refetch on focus |
-| Active run state | Zustand `useRunStore` | SSE events mutate this store; components subscribe selectively |
-| SSE connection | Custom hook `useRunStream` | Opens `EventSource`, dispatches events into Zustand store, cleans up on unmount |
-| Form state | React Hook Form | Minimal re-renders, built-in validation |
-| UI component state | Local `useState` | Dropdowns, modals — no global concern |
+```
+useRunStore
+  activeRunId: string | null
+  runs: Map<string, RunState>
+  -- actions --
+  createRun(task)
+  applyEvent(runId, SSEEvent)   ← single reducer for all SSE events
+  approveRun(runId)
+```
+
+`RunState` mirrors the backend `WorkflowRun` type exactly (shared via `contracts.ts`).
+All SSE events are typed discriminated unions — the reducer switches on `event.type`.
 
 ### Data Flow
 
 ```
 User submits task
-  → POST /api/runs  →  RunDetailPage opens
-  → useRunStream opens EventSource to /api/runs/:runId/stream
-  → SSE events arrive (supervisor_state_changed, agent_started, agent_result, evidence_added, approval_required, run_completed)
-  → useRunStore.dispatch() updates normalized state
-  → Components re-render selectively
+  → POST /api/runs
+  → GET /api/runs/:id/events  (SSE stream opens)
+  → applyEvent() on every message → Zustand store updates
+  → Components are reactive via useRunStore selectors
+  → ApprovalBanner renders when state === "AWAITING_APPROVAL"
+  → User clicks Approve → PATCH /api/runs/:id/approve
 ```
 
-### Where Polish Matters for the Demo
+### Polish Priorities (demo-critical)
 
-1. **AgentLane pulse animation** — a glowing ring on active agents; evaluators immediately see parallelism
-2. **SupervisorPanel state transitions** — smooth badge color change + subtle slide animation per state
-3. **EvidenceLedger row entry** — each new evidence item slides in; makes the ledger feel "live"
-4. **ApprovalGate** — prominent card with a gentle attention-seeking animation; human-in-the-loop moment is the most important UX beat
-5. **AgentLogStream** — streaming log lines that auto-scroll; feels like a real CI/CD tool
-6. **Run completion** — confetti or checkmark animation on success; red flash on unrecoverable failure
+1. **PipelineView** — the core visual. Smooth status ring animations (CSS keyframes),
+   dependency edges that "light up" green/red as stages complete.
+2. **LogStream** — real-time streaming feel with typewriter-like append. Gives the
+   impression of a live system even with stubs.
+3. **StatusBadge** — every state transition must have a distinct colour + micro-animation
+   (pulse on RUNNING, checkmark pop on DONE, shake on FAILED).
+4. **ApprovalBanner** — high-contrast, sticky, cannot be missed. This is the
+   human-in-the-loop moment evaluators will watch closely.
+5. **Dark theme** — Linear/Vercel aesthetic. Slate-900 background, subtle borders,
+   monospace log font.
 
 ---
 
 ## 3. Backend Architecture
 
-### Stack
-
-- **Node.js 20 LTS** + **TypeScript** (strict, `moduleResolution: bundler`)
-- **Express 4** (HTTP server + SSE middleware)
-- **Zod** (schema validation for all LLM responses and request bodies)
-- **OpenAI Node SDK** (with a `MockLLMAdapter` behind an interface for offline testing)
-- **Vitest** (unit tests for Supervisor logic and agent adapters)
-
 ### Module Boundaries
 
 ```
 backend/src/
-├── server.ts           — Express app factory, mounts routes
-├── routes/             — Thin HTTP handlers; no business logic
-├── supervisor/         — Orchestration engine (state machine + scheduler)
-├── agents/             — One file per agent; each exports a pure async function
-├── llm/                — LLM adapter interface + OpenAI implementation + Mock
-├── store/              — RunStore (in-memory state for all active runs)
-├── ledger/             — EvidenceLedger (append-only log of artifacts)
-├── events/             — SSE broadcaster; typed event union
-└── types/              — Shared contracts (re-exported from root contracts.ts)
+├── server.ts              — Express app factory, middleware, route registration
+├── routes/
+│   ├── runs.ts            — POST /runs, GET /runs/:id, PATCH /runs/:id/approve
+│   └── events.ts          — GET /runs/:id/events (SSE)
+├── supervisor/
+│   ├── supervisor.ts      — Orchestrator: drives the state machine
+│   ├── stateMachine.ts    — Pure state transition functions (no side effects)
+│   ├── taskDecomposer.ts  — Splits raw task into subtasks + dependency graph
+│   ├── scheduler.ts       — Determines which subtasks are ready to run in parallel
+│   └── evidenceLedger.ts  — Append-only log of all agent results + decisions
+├── agents/
+│   ├── agentRunner.ts     — Spawns agent, wraps result in AgentResult type
+│   ├── codeIntelligence.ts — Stub: analyses code, returns findings
+│   ├── testQA.ts          — Stub: runs tests, returns pass/fail + coverage
+│   └── debugReview.ts     — Stub: reviews failures, proposes fixes
+├── types/
+│   └── contracts.ts       — ALL shared types (WorkflowRun, AgentResult, SSEEvent, …)
+└── store/
+    └── runStore.ts        — In-memory Map<runId, WorkflowRun>, thread-safe updates
 ```
 
-### Communication Flow
+### Communication Pattern
+
+The Supervisor is the **only** component that writes to RunStore and emits SSE events.
+Agents are pure async functions: `(input: AgentInput) => Promise<AgentResult>`.
+The Supervisor awaits them, writes results to the ledger, then drives the state machine.
 
 ```
-Route Handler
-  → creates Run in RunStore
-  → starts Supervisor.run(runId, task)
-  → returns runId immediately (202 Accepted)
-
-Supervisor.run()
-  → calls LLM to decompose task into SubTasks
-  → identifies parallel groups
-  → for each group: calls agents concurrently via Promise.allSettled()
-  → collects AgentResult objects
-  → writes to EvidenceLedger
-  → emits SSE events at every state transition
-  → on test failure: transitions to RECOVERY state, re-assigns
-  → on all requirements verified: transitions to AWAITING_APPROVAL
-  → on human approval: transitions to COMPLETED
-
-Agents (CodeIntelligenceAgent, TestQAAgent, DebugReviewAgent)
-  → receive a typed AgentInput
-  → call LLM with a focused, structured prompt
-  → return a typed AgentResult
-  → all LLM calls are wrapped: timeout + retry (max 2) + zod parse
+Supervisor.run(task)
+  → taskDecomposer.decompose(task) → SubTask[]
+  → loop: scheduler.getReady(subtasks) → parallel Promise.all(agentRunner.run(…))
+  → each result → evidenceLedger.append()
+  → stateMachine.transition(currentState, event) → nextState
+  → runStore.update(runId, nextState)
+  → sseEmitter.emit(runId, event)
 ```
 
-### Failure Handling
+### Failure Handling Location
 
-| Failure Type | Location | Handling |
-|---|---|---|
-| LLM API timeout/error | `llm/openai-adapter.ts` | Retry once; if second fails, return `AgentResult { status: "error", error: "LLM unavailable" }` |
-| LLM response fails Zod parse | `llm/openai-adapter.ts` | Retry once with "please return valid JSON" reminder; if still fails, return error result |
-| Agent returns error status | `supervisor/scheduler.ts` | Supervisor transitions to RECOVERY, re-assigns to DebugReviewAgent |
-| Test failure detected | `supervisor/index.ts` | Transition to TEST_FAILURE state, request fix from CodeIntelligenceAgent, re-trigger TestQAAgent |
-| Max retries exceeded | `supervisor/index.ts` | Transition to FAILED state, emit final event, stop |
-| Unhandled promise | `server.ts` | Global `process.on('unhandledRejection')` logs + marks run as FAILED |
+- **Agent-level errors** are caught in `agentRunner.ts` — always returns `AgentResult`
+  (never throws). Failed results have `status: "failed"` and a `reason` string.
+- **Retry/recovery logic** lives in `supervisor.ts` — it checks `AgentResult.status`
+  and decides whether to invoke `debugReview` agent or escalate.
+- **State machine guards** in `stateMachine.ts` prevent invalid transitions (e.g. you
+  cannot go from DONE → RUNNING). This is the safety net.
 
 ---
 
@@ -188,38 +171,45 @@ Agents (CodeIntelligenceAgent, TestQAAgent, DebugReviewAgent)
 
 ### States
 
-```
-IDLE → DECOMPOSING → PLANNING → EXECUTING → TESTING → REVIEWING
-     ↓                                        ↓
-     ...                              TEST_FAILURE → RECOVERY → EXECUTING (retry)
-                                                           ↓ (max retries)
-                                                        FAILED
-REVIEWING → AWAITING_APPROVAL → COMPLETED
-          ↓ (requirements not met)
-        RECOVERY → EXECUTING (retry)
-```
+| State | Meaning |
+|---|---|
+| `IDLE` | Run created, not yet started |
+| `DECOMPOSING` | Task decomposer running |
+| `SCHEDULING` | Determining which subtasks are ready |
+| `RUNNING` | One or more agents executing in parallel |
+| `COLLECTING` | All agents for this wave done, aggregating results |
+| `VERIFYING` | Checking all subtasks passed their acceptance criteria |
+| `RECOVERY` | A failure was detected; Debug & Review agent invoked |
+| `AWAITING_APPROVAL` | All criteria met; waiting for human sign-off |
+| `DONE` | Human approved; run complete |
+| `FAILED` | Recovery exhausted (max retries hit) |
 
-### State Definitions
+### Transitions
 
-| State | Entry Condition | Exit Condition | Actions |
-|---|---|---|---|
-| `IDLE` | Run created | Task submitted | Emit `run_created` |
-| `DECOMPOSING` | Task submitted | LLM returns SubTask list | Call LLM planner; emit `supervisor_state_changed` |
-| `PLANNING` | SubTasks received | Parallel groups identified | Build execution plan; emit `plan_ready` |
-| `EXECUTING` | Plan ready OR recovery complete | All agents in current group return results | Dispatch agents; emit `agent_started` per agent |
-| `TESTING` | Code agent results received | Test agent returns result | Dispatch TestQAAgent with code results |
-| `TEST_FAILURE` | TestQAAgent returns `status: "fail"` | — | Emit `test_failure`; transition to RECOVERY |
-| `RECOVERY` | Test failure OR review rejection | Fix dispatched | Dispatch DebugReviewAgent + CodeIntelligenceAgent fix; increment retry counter |
-| `REVIEWING` | All tests pass | Review complete | Dispatch DebugReviewAgent for final review |
-| `AWAITING_APPROVAL` | Review passes requirements check | Human approves or rejects | Emit `approval_required`; block until HTTP POST approval |
-| `COMPLETED` | Human approves | — | Emit `run_completed`; finalize evidence ledger |
-| `FAILED` | Retry count ≥ `MAX_RETRIES` (3) | — | Emit `run_failed`; record failure reason |
+```
+IDLE → DECOMPOSING           on: run started
+DECOMPOSING → SCHEDULING     on: decomposition complete
+SCHEDULING → RUNNING         on: ready tasks identified (≥1)
+RUNNING → COLLECTING         on: all parallel agents in wave complete
+COLLECTING → VERIFYING       on: results aggregated
+VERIFYING → SCHEDULING       on: more subtasks remain (dependency-unblocked)
+VERIFYING → RECOVERY         on: any subtask result.status === "failed"
+VERIFYING → AWAITING_APPROVAL on: all subtasks passed + criteria met
+RECOVERY → SCHEDULING        on: debug agent produced a fix (retry ≤ maxRetries)
+RECOVERY → FAILED            on: retries exhausted OR debug agent failed
+AWAITING_APPROVAL → DONE     on: human approved
+AWAITING_APPROVAL → RECOVERY on: human rejected (treated as a new failure)
+DONE → (terminal)
+FAILED → (terminal)
+```
 
 ### Retry Bounding
 
-- `MAX_RETRIES = 3` — hard cap, not configurable at runtime (avoids live-demo infinite loop)
-- Retry counter is per-run and per-subtask
-- On `FAILED`, the Supervisor stops all pending work and emits a structured failure event with the last error
+- Each subtask carries `retryCount: number` (starts at 0).
+- `MAX_RETRIES = 2` (configurable constant in `supervisor.ts`).
+- On `VERIFYING → RECOVERY`: `retryCount++`; if `retryCount > MAX_RETRIES` →
+  transition to `FAILED` instead.
+- This guarantees the demo never loops infinitely.
 
 ---
 
@@ -227,125 +217,119 @@ REVIEWING → AWAITING_APPROVAL → COMPLETED
 
 ### Code Intelligence Agent
 
-**Role:** Generates or modifies code based on a sub-task specification.
-
 **Input:**
 ```typescript
 {
-  subtaskId: string
-  description: string       // "Implement addToCart function"
-  context: string           // existing code or interface contract
-  constraints: string[]     // e.g. ["must be pure function", "TypeScript strict"]
+  subtaskId: string;
+  type: "CODE_ANALYSIS";
+  payload: {
+    taskDescription: string;
+    codeContext: string;      // simulated: a short code snippet
+  }
 }
 ```
 
 **Output:**
 ```typescript
 {
-  subtaskId: string
-  status: "success" | "error"
-  artifact: {
-    filename: string
-    language: string
-    code: string
-    explanation: string
-  } | null
-  error?: string
+  subtaskId: string;
+  agentType: "CODE_INTELLIGENCE";
+  status: "passed" | "failed";
+  findings: Finding[];          // list of identified issues or confirmations
+  suggestedChanges: Change[];   // proposed code edits
+  durationMs: number;
 }
 ```
 
-**Done when:** Code artifact passes Zod validation, `status === "success"`, explanation is non-empty.
+**Done means:** All code in scope has been analysed; every finding has a severity;
+suggested changes cover all HIGH severity findings.
 
 ---
 
 ### Test & QA Agent
 
-**Role:** Writes and validates tests for a code artifact; simulates test execution and reports results.
-
 **Input:**
 ```typescript
 {
-  subtaskId: string
-  codeArtifact: CodeArtifact   // output from CodeIntelligenceAgent
-  requirements: string[]       // acceptance criteria to test against
+  subtaskId: string;
+  type: "TEST_EXECUTION";
+  payload: {
+    taskDescription: string;
+    targetModule: string;
+    testSuite: string;          // simulated: test identifiers
+  }
 }
 ```
 
 **Output:**
 ```typescript
 {
-  subtaskId: string
-  status: "pass" | "fail" | "error"
-  testSuite: {
-    totalTests: number
-    passed: number
-    failed: number
-    testCases: Array<{
-      name: string
-      status: "pass" | "fail"
-      message?: string
-    }>
-  }
-  coverageNotes: string
-  error?: string
+  subtaskId: string;
+  agentType: "TEST_QA";
+  status: "passed" | "failed";
+  testResults: TestResult[];    // per-test pass/fail
+  coveragePercent: number;
+  failureDetails?: string;      // present when status === "failed"
+  durationMs: number;
 }
 ```
 
-**Done when:** `status === "pass"` and all required behaviors are covered by test cases.
+**Done means:** All tests in suite executed; coverage reported; no test is in an
+ambiguous state.
 
 ---
 
 ### Debug & Review Agent
 
-**Role:** Reviews code quality, identifies bugs, checks requirements alignment, and in recovery mode diagnoses test failures.
-
 **Input:**
 ```typescript
 {
-  subtaskId: string
-  mode: "review" | "debug"
-  codeArtifact: CodeArtifact
-  testResult?: TestResult       // required when mode === "debug"
-  requirements: string[]
+  subtaskId: string;
+  type: "DEBUG_REVIEW";
+  payload: {
+    failedSubtaskId: string;
+    failureReason: string;
+    agentOutput: AgentResult;   // the failing agent's last output
+    retryCount: number;
+  }
 }
 ```
 
 **Output:**
 ```typescript
 {
-  subtaskId: string
-  status: "approved" | "rejected" | "fix_provided"
-  findings: Array<{
-    severity: "critical" | "warning" | "info"
-    message: string
-    line?: number
-  }>
-  fixSuggestion?: string        // populated when status === "fix_provided"
-  requirementsMet: boolean
-  error?: string
+  subtaskId: string;
+  agentType: "DEBUG_REVIEW";
+  status: "passed" | "failed";
+  rootCause: string;
+  proposedFix: string;
+  confidence: "high" | "medium" | "low";
+  durationMs: number;
 }
 ```
 
-**Done when:** `status === "approved"` and `requirementsMet === true`.
+**Done means:** Root cause identified; a concrete fix is proposed; the failing subtask
+has been re-queued with the fix applied (or escalated if confidence === "low" and
+retries exhausted).
 
 ---
 
 ## 6. Handoff Contracts
 
-### Run Object (stored in RunStore)
+### WorkflowRun (primary shared type)
 
 ```typescript
-interface Run {
-  id: string                    // UUID
-  task: string                  // original developer task
-  status: SupervisorState
-  plan: SubTask[]
-  results: Map<string, AgentResult>
-  retryCount: number
-  createdAt: string             // ISO 8601
-  updatedAt: string
-  completedAt?: string
-  failureReason?: string
+interface WorkflowRun {
+  id: string;                          // uuid
+  task: string;                        // raw developer task
+  state: SupervisorState;
+  subtasks: SubTask[];
+  evidenceLedger: LedgerEntry[];
+  createdAt: string;                   // ISO timestamp
+  updatedAt: string;
+  approvalRequired: boolean;
+  approvedAt?: string;
+  failureReason?: string;
 }
 ```
 
@@ -353,718 +337,447 @@ interface Run {
 
 ```typescript
 interface SubTask {
-  id: string
-  description: string
-  assignedAgent: AgentType      // "code" | "test" | "debug"
-  dependsOn: string[]           // subtask IDs that must complete first
-  parallelGroup: number         // agents in same group run concurrently
-  requirements: string[]
-  status: "pending" | "in_progress" | "done" | "failed"
+  id: string;
+  description: string;
+  agentType: AgentType;               // "CODE_INTELLIGENCE" | "TEST_QA" | "DEBUG_REVIEW"
+  status: SubTaskStatus;              // "pending" | "running" | "passed" | "failed" | "skipped"
+  dependencies: string[];             // ids of subtasks that must pass first
+  retryCount: number;
+  result?: AgentResult;
 }
 ```
 
-### Evidence Ledger Entry
+### LedgerEntry (Evidence Ledger)
 
 ```typescript
-interface EvidenceLedgerEntry {
-  id: string
-  runId: string
-  subtaskId: string
-  agentType: AgentType
-  timestamp: string             // ISO 8601
-  type: "code_artifact" | "test_result" | "review_finding" | "supervisor_decision"
-  payload: CodeArtifact | TestResult | ReviewResult | SupervisorDecision
-  metadata: {
-    retryAttempt: number
-    durationMs: number
-  }
+interface LedgerEntry {
+  id: string;
+  runId: string;
+  subtaskId: string;
+  agentType: AgentType;
+  timestamp: string;
+  event: LedgerEventType;             // "AGENT_STARTED" | "AGENT_COMPLETED" | "RETRY_TRIGGERED"
+                                      // | "RECOVERY_STARTED" | "APPROVAL_REQUESTED"
+                                      // | "APPROVED" | "REJECTED" | "RUN_FAILED"
+  payload: AgentResult | Record<string, unknown>;
 }
 ```
 
-### SSE Event Union
+### SSEEvent (stream to frontend)
 
 ```typescript
-type RunEvent =
-  | { type: "run_created";            runId: string; task: string }
-  | { type: "supervisor_state_changed"; runId: string; from: SupervisorState; to: SupervisorState }
-  | { type: "plan_ready";             runId: string; plan: SubTask[] }
-  | { type: "agent_started";          runId: string; subtaskId: string; agentType: AgentType }
-  | { type: "agent_result";           runId: string; subtaskId: string; result: AgentResult }
-  | { type: "evidence_added";         runId: string; entry: EvidenceLedgerEntry }
-  | { type: "test_failure";           runId: string; subtaskId: string; failureDetail: string }
-  | { type: "recovery_started";       runId: string; retryAttempt: number }
-  | { type: "approval_required";      runId: string; summary: ApprovalSummary }
-  | { type: "run_completed";          runId: string; ledgerEntryCount: number }
-  | { type: "run_failed";             runId: string; reason: string }
+type SSEEvent =
+  | { type: "RUN_STATE_CHANGED"; runId: string; state: SupervisorState }
+  | { type: "SUBTASK_UPDATED"; runId: string; subtask: SubTask }
+  | { type: "LEDGER_ENTRY_ADDED"; runId: string; entry: LedgerEntry }
+  | { type: "APPROVAL_REQUIRED"; runId: string }
+  | { type: "RUN_COMPLETE"; runId: string; state: "DONE" | "FAILED" };
 ```
 
 ---
 
 ## 7. API Design
 
-### Base URL: `/api`
+### Conventions
 
-### Error Response Convention
-
-Every error response uses this shape — no ad hoc strings:
-
-```typescript
-interface ApiError {
-  error: {
-    code: string        // machine-readable e.g. "RUN_NOT_FOUND"
-    message: string     // human-readable
-    details?: unknown   // optional extra context
-  }
-}
-```
-
-HTTP status → error code mapping is consistent:
-- `400` → validation errors (`VALIDATION_ERROR`)
-- `404` → resource not found (`RUN_NOT_FOUND`, `TASK_NOT_FOUND`)
-- `409` → conflict (`RUN_ALREADY_COMPLETED`)
-- `500` → internal server error (`INTERNAL_ERROR`)
-
----
+- All responses: `Content-Type: application/json`
+- Success: HTTP 200/201 with `{ data: T }`
+- Error: HTTP 4xx/5xx with `{ error: { code: string; message: string } }`
+- Run IDs are UUIDs generated server-side
+- SSE stream uses `data: <JSON>\n\n` framing; `event:` field matches `SSEEvent.type`
 
 ### Endpoints
 
-#### `POST /api/runs`
+#### POST /api/runs
+Create and start a new workflow run.
 
-Start a new supervised run.
-
-**Request:**
-```typescript
-{ task: string }   // min 10 chars, max 2000 chars
+Request:
+```json
+{ "task": "Add rate limiting to the /api/users endpoint" }
 ```
+Response 201:
+```json
+{ "data": { "id": "uuid", "state": "IDLE", "task": "...", "subtasks": [], "evidenceLedger": [] } }
+```
+Error 400: `{ "error": { "code": "INVALID_TASK", "message": "task must be a non-empty string" } }`
 
-**Response `202`:**
-```typescript
-{
-  runId: string
-  status: "IDLE"
-  createdAt: string
-}
+---
+
+#### GET /api/runs/:id
+Fetch current snapshot of a run (for page load / reconnect).
+
+Response 200: `{ "data": WorkflowRun }`
+Error 404: `{ "error": { "code": "RUN_NOT_FOUND", "message": "..." } }`
+
+---
+
+#### GET /api/runs/:id/events
+SSE stream of all events for this run from current time forward.
+On connect, replays all existing `LedgerEntry` events so the client can hydrate.
+
+Headers: `Accept: text/event-stream`
+Stream format:
+```
+event: SUBTASK_UPDATED
+data: {"type":"SUBTASK_UPDATED","runId":"...","subtask":{...}}
+
+event: RUN_STATE_CHANGED
+data: {"type":"RUN_STATE_CHANGED","runId":"...","state":"RUNNING"}
 ```
 
 ---
 
-#### `GET /api/runs`
+#### PATCH /api/runs/:id/approve
+Human approval (or rejection) of a run awaiting sign-off.
 
-List all runs (most recent first).
-
-**Response `200`:**
-```typescript
-{
-  runs: Array<{
-    id: string
-    task: string
-    status: SupervisorState
-    createdAt: string
-    updatedAt: string
-    retryCount: number
-  }>
-}
+Request:
+```json
+{ "approved": true }
 ```
+Response 200: `{ "data": { "id": "uuid", "state": "DONE" } }`
+Error 409: `{ "error": { "code": "NOT_AWAITING_APPROVAL", "message": "..." } }`
 
 ---
 
-#### `GET /api/runs/:runId`
+#### GET /api/runs
+List recent runs (for sidebar).
 
-Get full run detail including plan and all results.
-
-**Response `200`:** Full `Run` object (with results serialized as an array).
-
-**Response `404`:** `RUN_NOT_FOUND`
-
----
-
-#### `GET /api/runs/:runId/stream`
-
-Server-Sent Events stream. Client connects and receives all `RunEvent` payloads as `data: <JSON>\n\n`.
-
-Headers: `Content-Type: text/event-stream`, `Cache-Control: no-cache`
-
-Sends a `ping` comment every 15s to keep connection alive.
-
-**Response `404`:** `RUN_NOT_FOUND` (sent before headers are set, as JSON)
-
----
-
-#### `POST /api/runs/:runId/approve`
-
-Human approves the run at `AWAITING_APPROVAL`.
-
-**Request:** `{}` (empty body, approval is binary for the prototype)
-
-**Response `200`:**
-```typescript
-{ runId: string; status: "COMPLETED" }
-```
-
-**Response `409`:** `RUN_NOT_AWAITING_APPROVAL`
-
----
-
-#### `POST /api/runs/:runId/reject`
-
-Human rejects and requests revision.
-
-**Request:**
-```typescript
-{ reason: string }
-```
-
-**Response `200`:**
-```typescript
-{ runId: string; status: "RECOVERY" }
-```
-
----
-
-#### `GET /api/runs/:runId/ledger`
-
-Retrieve the full evidence ledger for a run.
-
-**Response `200`:**
-```typescript
-{ entries: EvidenceLedgerEntry[] }
-```
-
----
-
-#### `GET /api/health`
-
-Health check for the demo.
-
-**Response `200`:**
-```typescript
-{ status: "ok"; uptime: number }
-```
+Response 200: `{ "data": [{ id, task, state, createdAt }] }`
 
 ---
 
 ## 8. Folder Structure
 
-### Backend
-
 ```
-backend/
-├── package.json
-├── tsconfig.json
-├── vitest.config.ts
-├── .env.example
-└── src/
-    ├── server.ts                     # Express app factory + startup
-    ├── agents/
-    │   ├── code-intelligence.ts      # CodeIntelligenceAgent
-    │   ├── test-qa.ts                # TestQAAgent
-    │   ├── debug-review.ts           # DebugReviewAgent
-    │   └── index.ts                  # re-exports all agents
-    ├── llm/
-    │   ├── types.ts                  # LLMAdapter interface
-    │   ├── openai-adapter.ts         # OpenAI implementation
-    │   └── mock-adapter.ts           # Deterministic mock for offline/demo mode
-    ├── supervisor/
-    │   ├── index.ts                  # Supervisor class (state machine)
-    │   ├── planner.ts                # Task decomposition logic
-    │   ├── scheduler.ts              # Parallel group execution
-    │   └── states.ts                 # State enum + transition helpers
-    ├── store/
-    │   └── run-store.ts              # In-memory RunStore
-    ├── ledger/
-    │   └── evidence-ledger.ts        # EvidenceLedger (append-only)
-    ├── events/
-    │   └── sse-broadcaster.ts        # SSE connection registry + emit
-    ├── routes/
-    │   ├── runs.ts                   # /api/runs routes
-    │   └── health.ts                 # /api/health route
-    └── types/
-        └── contracts.ts              # All shared types (Run, SubTask, AgentInput/Output, etc.)
-```
-
-### Frontend
-
-```
-frontend/
-├── package.json
-├── tsconfig.json
-├── vite.config.ts
-├── tailwind.config.ts
-├── postcss.config.js
-├── index.html
-└── src/
-    ├── main.tsx                      # React root mount
-    ├── App.tsx                       # Router setup
-    ├── api/
-    │   ├── client.ts                 # fetch wrapper with error normalization
-    │   ├── runs.ts                   # React Query hooks for run endpoints
-    │   └── types.ts                  # Frontend-facing API types (mirrors contracts.ts)
-    ├── hooks/
-    │   └── useRunStream.ts           # SSE EventSource hook → Zustand dispatch
-    ├── store/
-    │   └── run-store.ts              # Zustand store for active run state
-    ├── pages/
-    │   ├── DashboardPage.tsx         # Route: /
-    │   └── RunDetailPage.tsx         # Route: /runs/:runId
-    ├── components/
-    │   ├── layout/
-    │   │   ├── AppLayout.tsx
-    │   │   ├── Sidebar.tsx
-    │   │   └── Header.tsx
-    │   ├── dashboard/
-    │   │   ├── NewRunForm.tsx
-    │   │   └── RunHistoryList.tsx
-    │   ├── run/
-    │   │   ├── RunHeader.tsx
-    │   │   ├── SupervisorPanel.tsx
-    │   │   ├── AgentLane.tsx
-    │   │   ├── AgentLogStream.tsx
-    │   │   ├── AgentResultCard.tsx
-    │   │   ├── EvidenceLedger.tsx
-    │   │   └── ApprovalGate.tsx
-    │   └── ui/                       # shadcn/ui primitives (auto-generated)
-    ├── lib/
-    │   └── utils.ts                  # cn() + misc helpers
-    └── styles/
-        └── globals.css               # Tailwind base + custom CSS variables
+agentflow/
+├── agentflow-plan.md
+├── README.md
+├── backend/
+│   ├── package.json
+│   ├── tsconfig.json
+│   ├── src/
+│   │   ├── server.ts
+│   │   ├── store/
+│   │   │   └── runStore.ts
+│   │   ├── supervisor/
+│   │   │   ├── supervisor.ts
+│   │   │   ├── stateMachine.ts
+│   │   │   ├── taskDecomposer.ts
+│   │   │   ├── scheduler.ts
+│   │   │   └── evidenceLedger.ts
+│   │   ├── agents/
+│   │   │   ├── agentRunner.ts
+│   │   │   ├── codeIntelligence.ts
+│   │   │   ├── testQA.ts
+│   │   │   └── debugReview.ts
+│   │   ├── routes/
+│   │   │   ├── runs.ts
+│   │   │   └── events.ts
+│   │   └── types/
+│   │       └── contracts.ts
+│   └── tests/
+│       ├── stateMachine.test.ts
+│       ├── taskDecomposer.test.ts
+│       ├── scheduler.test.ts
+│       └── supervisor.integration.test.ts
+├── frontend/
+│   ├── package.json
+│   ├── vite.config.ts
+│   ├── tsconfig.json
+│   ├── index.html
+│   └── src/
+│       ├── main.tsx
+│       ├── App.tsx
+│       ├── store/
+│       │   └── runStore.ts
+│       ├── api/
+│       │   ├── client.ts          — typed fetch wrapper
+│       │   └── sse.ts             — SSE connection manager
+│       ├── pages/
+│       │   ├── NewRunPage.tsx
+│       │   ├── RunDetailPage.tsx
+│       │   └── EvidenceLedgerPage.tsx
+│       ├── components/
+│       │   ├── Layout.tsx
+│       │   ├── Sidebar.tsx
+│       │   ├── TopBar.tsx
+│       │   ├── TaskInput.tsx
+│       │   ├── PipelineView/
+│       │   │   ├── index.tsx
+│       │   │   ├── StageNode.tsx
+│       │   │   └── DependencyEdge.tsx
+│       │   ├── AgentCard.tsx
+│       │   ├── StatusBadge.tsx
+│       │   ├── EvidenceTable.tsx
+│       │   ├── ApprovalBanner.tsx
+│       │   └── LogStream.tsx
+│       └── types/
+│           └── contracts.ts       — symlinked or copied from backend types
 ```
 
 ---
 
 ## 9. Demo Scenario
 
-### Scenario: "Add Shopping Cart to E-Commerce API"
+### The Scenario: "Add Rate Limiting to the Auth Endpoint"
 
-This is a fixed, deterministic scenario. It is embedded in `mock-adapter.ts` and does not require live LLM calls unless `DEMO_MODE=live` is set.
+This scenario is **fully deterministic** — all timing and outcomes are hard-coded in
+agent stubs. No randomness.
 
-### Task String (exact)
-```
-Add a shopping cart feature to the e-commerce API. The cart must support:
-adding items with quantity, removing items, clearing the cart, and calculating 
-the total price. Each cart is scoped to a userId.
-```
+**Task submitted:** `"Add rate limiting to the /api/auth/login endpoint to prevent brute-force attacks"`
 
-### Execution Script (deterministic)
+**Decomposed subtasks (always exactly these 3):**
 
-**Phase 1 — Decompose + Plan**
-- Supervisor calls LLM planner → returns 3 sub-tasks
-- Sub-task 1: `Implement CartService with addItem, removeItem, clearCart, getTotal` (Code Agent)
-- Sub-task 2: `Write unit tests for CartService` (Test Agent) — depends on Sub-task 1
-- Sub-task 3: `Review CartService for correctness and edge cases` (Debug Agent) — depends on Sub-task 2
+| # | ID | Description | Agent | Dependencies |
+|---|---|---|---|---|
+| 1 | `subtask-001` | Analyse current auth endpoint code for security issues | CODE_INTELLIGENCE | none |
+| 2 | `subtask-002` | Run security test suite against auth endpoint | TEST_QA | none |
+| 3 | `subtask-003` | Review and verify rate limiting implementation | CODE_INTELLIGENCE | 001, 002 |
 
-**Phase 2 — Execute (Sub-task 1)**
-- CodeIntelligenceAgent generates `CartService` TypeScript class
-- SSE events: `agent_started`, then `agent_result` with code artifact
-- Evidence entry #1 added
+**Happy Path (Wave 1: subtasks 1 & 2 run in parallel):**
+- `subtask-001` completes in ~2.5s → status: passed
+- `subtask-002` completes in ~3.5s → status: **FAILED** (test "should reject after 5 attempts" fails)
 
-**Phase 3 — Test (Sub-task 2) — CONTROLLED FAILURE**
-- TestQAAgent runs; mock returns `status: "fail"` for first attempt
-- Failing test: `"getTotal() should return 0 for empty cart"` — mock says `getTotal` is missing null guard
-- SSE events: `agent_result` (fail), `test_failure`, `recovery_started`
-- Supervisor transitions: `TESTING → TEST_FAILURE → RECOVERY`
+**Recovery Cycle (the controlled failure):**
+- Supervisor transitions to RECOVERY
+- Debug & Review agent invoked for `subtask-002` (~2s)
+- Root cause: "Rate limit middleware not yet applied; test expectation correct"
+- Fix proposed: "Apply express-rate-limit to /api/auth/login before handler"
+- `subtask-002` retried → passes (~2s)
 
-**Phase 4 — Recovery**
-- DebugReviewAgent (debug mode) returns `fix_provided`: "Add null check in getTotal"
-- CodeIntelligenceAgent regenerates with fix applied
-- Evidence entries #2 (test fail), #3 (debug fix), #4 (revised code)
+**Wave 2:**
+- `subtask-003` runs (both dependencies now passed) → passes (~2s)
+- Supervisor transitions to AWAITING_APPROVAL
+- ApprovalBanner appears
 
-**Phase 5 — Retest**
-- TestQAAgent runs again; mock returns `status: "pass"`, 6/6 tests pass
-- Evidence entry #5
+**Human approves → DONE**
 
-**Phase 6 — Review**
-- DebugReviewAgent (review mode) returns `status: "approved"`, `requirementsMet: true`
-- Evidence entry #6
+**Total demo runtime:** ~14 seconds of visible activity, fully repeatable.
 
-**Phase 7 — Approval Gate**
-- Supervisor transitions to `AWAITING_APPROVAL`
-- Frontend shows `ApprovalGate` with summary
-- Human clicks "Approve"
-- POST `/api/runs/:runId/approve`
-- Run transitions to `COMPLETED`
-
-### Why This Scenario Works for a Demo
-
-- **Concrete and relatable** — every evaluator understands "shopping cart"
-- **Covers the full loop** — all three agents are used, parallelism is planned (even if sub-tasks are sequential here)
-- **Controlled failure** — the test failure on first attempt is always triggered by the mock; never unpredictable
-- **Human moment** — the Approval Gate gives the presenter a natural pause to explain the human-in-the-loop design
-- **Repeatable** — same mock responses every time; no LLM variance in the demo path
+### Why This Works as a Demo
+- Evaluators see: task decomposition, parallel execution, real-time pipeline view,
+  a test failure, automatic recovery, retry success, and human approval — the full loop.
+- Nothing is random — every state transition is deterministic.
+- The failure is obviously meaningful (test fails because the feature isn't implemented
+  yet), making the recovery narrative easy to follow.
 
 ---
 
 ## 10. Implementation Order
 
-### Phase 1 — Core Loop (backend + minimal UI)
+Each sub-task below is designed to be implemented and verified independently.
+A demoable core loop exists after Sub-Task 4.
 
-Goal: a working end-to-end loop exists even if it looks rough.
-
-1. **Backend scaffold** — `package.json`, `tsconfig.json`, Express server, `/api/health`, CORS
-2. **Types & contracts** — populate `contracts.ts` with all shared types (Run, SubTask, AgentInput/Output, RunEvent, etc.)
-3. **RunStore + EvidenceLedger** — in-memory implementations
-4. **SSE broadcaster** — connection registry + `emit()` helper
-5. **LLM adapter interface + Mock adapter** — deterministic mock for demo scenario
-6. **Agents** — CodeIntelligenceAgent, TestQAAgent, DebugReviewAgent (using mock adapter)
-7. **Supervisor state machine** — planner, scheduler, full state transitions, retry logic
-8. **Routes** — `/api/runs` POST + GET, `/api/runs/:runId` GET, `/api/runs/:runId/stream`, approve/reject
-9. **Frontend scaffold** — `package.json`, Vite, React, Tailwind, shadcn/ui setup
-10. **Minimal RunDetailPage** — raw JSON dump of SSE events (proves the loop works end-to-end)
-
-### Phase 2 — Polish & Demo Path
-
-Goal: looks like a real product; demo scenario runs perfectly.
-
-11. **AppLayout + Sidebar + Header** — professional shell
-12. **DashboardPage** — NewRunForm + RunHistoryList with React Query
-13. **SupervisorPanel** — state badge with animated transitions
-14. **AgentLane** — one lane per agent with pulse animation and log stream
-15. **AgentResultCard** — code artifact display with syntax highlighting (Prism or Shiki)
-16. **EvidenceLedger** — animated row insertion
-17. **ApprovalGate** — prominent, polished card
-18. **OpenAI adapter** — real LLM calls behind the same interface (for `DEMO_MODE=live`)
-19. **Error boundary + 404 page** — graceful frontend failures
-
-### Phase 3 — Hardening (if time allows)
-
-20. **Vitest unit tests** — Supervisor state transitions, planner, scheduler
-21. **Zod validation** — all request bodies, all LLM responses
-22. **Reconnection logic** — SSE auto-reconnect with `Last-Event-ID`
-23. **README** — how to run, how to demo, environment variables
-
----
-
-## 11. Sub-Tasks
-
-Each sub-task below is scoped for one focused implementation session.
-
----
-
-### ST-01: Backend Scaffold & Health Route
-
-**Intent:** Get a working Express server that returns health and accepts CORS from the frontend.
+### Sub-Task 1: Shared Types & Contracts [ ] pending
+**Intent:** Define all TypeScript interfaces in `contracts.ts`. Everything else depends
+on these shapes. Getting them right first prevents type-churn throughout the build.
 
 **Expected Outcomes:**
-- `GET /api/health` returns `{ status: "ok", uptime: number }`
-- TypeScript compiles cleanly (`tsc --noEmit`)
-- `npm run dev` starts the server with hot reload (ts-node-dev or tsx watch)
+- `backend/src/types/contracts.ts` exports all types: `WorkflowRun`, `SubTask`,
+  `AgentResult`, `LedgerEntry`, `SSEEvent`, `SupervisorState`, `AgentType`, etc.
+- Types compile with `strict: true`, no `any`.
+- Frontend `src/types/contracts.ts` is identical (copied; kept in sync manually for now).
 
 **Todo List:**
-- [ ] Create `backend/package.json` with `express`, `typescript`, `tsx`, `@types/express`, `@types/node`, `zod`, `openai`, `uuid`, `cors`
-- [ ] Create `backend/tsconfig.json` (strict, `moduleResolution: bundler`, `target: ES2022`)
-- [ ] Create `backend/src/server.ts` — Express app factory with CORS, JSON body parser, error middleware
-- [ ] Create `backend/src/routes/health.ts` — health endpoint
-- [ ] Add `npm run dev`, `npm run build`, `npm run typecheck` scripts
+1. Write all types in `backend/src/types/contracts.ts`
+2. Copy to `frontend/src/types/contracts.ts`
+3. Run `tsc --noEmit` to confirm zero errors
 
-**Relevant Context:** `backend/src/` scaffold already exists with empty directories.
-
-**Status:** `[ ] pending`
+**Relevant Context:** Section 6 (Handoff Contracts) defines the exact shapes.
 
 ---
 
-### ST-02: Shared Types & Contracts
-
-**Intent:** Define all data shapes in one place before any logic is written, so types guide implementation.
+### Sub-Task 2: Backend Scaffold + In-Memory Store [ ] pending
+**Intent:** Stand up the Express server, configure middleware, register route placeholders,
+and implement `runStore.ts`. This is the skeleton everything else attaches to.
 
 **Expected Outcomes:**
-- `contracts.ts` exports all types: `Run`, `SubTask`, `AgentType`, `SupervisorState`, `AgentInput`, `AgentOutput` variants, `EvidenceLedgerEntry`, `RunEvent` union, all API request/response shapes
+- `npm run dev` starts server on port 3001
+- `GET /api/runs` returns `{ data: [] }`
+- `runStore.ts` exposes typed CRUD: `create`, `get`, `getAll`, `update`
+- All routes return correct error shapes for missing resources
 
 **Todo List:**
-- [ ] Populate `backend/src/types/contracts.ts` with all types listed in sections 4–7 of this plan
-- [ ] Ensure all types are exported and have JSDoc comments
-- [ ] Run `tsc --noEmit` to verify no issues
+1. Create `backend/package.json` with deps: express, cors, uuid; devDeps: ts-node, nodemon, @types/*
+2. Create `backend/tsconfig.json` (strict, ES2022 target, module commonjs)
+3. Write `server.ts`: app factory, json middleware, cors, route mounting
+4. Write `runStore.ts`: Map-based store with typed helpers
+5. Write placeholder routes for all 5 endpoints
+6. Verify with curl/httpie that all routes respond with correct shapes
 
-**Relevant Context:** Types from sections 5, 6, 7 of this plan.
-
-**Status:** `[ ] pending`
+**Relevant Context:** Section 3 (Backend Architecture), Section 7 (API Design).
 
 ---
 
-### ST-03: RunStore + EvidenceLedger
-
-**Intent:** Provide in-memory state storage and the append-only evidence ledger that all other modules write to.
+### Sub-Task 3: State Machine + Task Decomposer + Scheduler [ ] pending
+**Intent:** Implement the pure orchestration logic — no agents, no HTTP yet. These are
+the most important functions and the easiest to unit-test in isolation.
 
 **Expected Outcomes:**
-- `RunStore` can create, get, update, and list runs
-- `EvidenceLedger` can append entries and retrieve by `runId`
-- Both are plain classes with no side effects — easy to unit test
+- `stateMachine.ts`: `transition(state, event)` returns correct next state for all valid
+  transitions; throws for invalid transitions.
+- `taskDecomposer.ts`: given the demo task string, always returns exactly the 3 defined
+  subtasks with correct dependencies.
+- `scheduler.ts`: `getReadySubtasks(subtasks)` returns only subtasks whose dependencies
+  are all `"passed"` and whose own status is `"pending"`.
+- All three modules have passing unit tests.
 
 **Todo List:**
-- [ ] Create `backend/src/store/run-store.ts` — `RunStore` class with `createRun`, `getRun`, `updateRun`, `listRuns`, `setResult`
-- [ ] Create `backend/src/ledger/evidence-ledger.ts` — `EvidenceLedger` class with `append`, `getByRunId`
-- [ ] Both use `Map<string, T>` internally
+1. Implement `stateMachine.ts` with full transition table
+2. Implement `taskDecomposer.ts` (hardcoded demo decomposition; extensible later)
+3. Implement `scheduler.ts`
+4. Write `tests/stateMachine.test.ts`
+5. Write `tests/taskDecomposer.test.ts`
+6. Write `tests/scheduler.test.ts`
+7. Run tests: all pass
 
-**Relevant Context:** `Run` and `EvidenceLedgerEntry` types from ST-02.
-
-**Status:** `[ ] pending`
+**Relevant Context:** Section 4 (State Machine), Section 9 (Demo Scenario).
 
 ---
 
-### ST-04: SSE Broadcaster
-
-**Intent:** Allow the Supervisor to emit typed events to all connected frontend clients for a given run.
+### Sub-Task 4: Agent Stubs + Supervisor + SSE Emitter [ ] pending
+**Intent:** Wire the Supervisor loop using the stubs. After this sub-task the full backend
+pipeline runs end-to-end: submit a task → supervisor drives state machine → agents
+execute → evidence ledger updated → SSE stream emits events.
 
 **Expected Outcomes:**
-- `SSEBroadcaster` class manages per-run `Response` connections
-- `emit(runId, event)` serializes `RunEvent` and writes to all connections for that run
-- Connections clean up properly on client disconnect
-- Ping interval keeps connections alive
+- All three agent stubs implement the correct input/output contracts with realistic delays.
+- `supervisor.ts` drives the full demo scenario including the controlled failure and recovery.
+- `evidenceLedger.ts` appends entries at every key event.
+- SSE stream on `GET /api/runs/:id/events` emits typed events in real time.
+- `POST /api/runs` + `GET /api/runs/:id/events` can be tested with curl and produce the
+  full demo sequence.
+- Integration test in `tests/supervisor.integration.test.ts` passes.
 
 **Todo List:**
-- [ ] Create `backend/src/events/sse-broadcaster.ts`
-- [ ] `register(runId, res)` — adds an Express `Response` to the set for that run, sets SSE headers, sets up cleanup on `res.on("close")`
-- [ ] `emit(runId, event: RunEvent)` — serializes to `data: <JSON>\n\n`
-- [ ] `ping()` — sends `: ping\n\n` comment every 15s via `setInterval`
-- [ ] Export a singleton instance
+1. Implement `agentRunner.ts` (wraps agent call, catches errors, returns `AgentResult`)
+2. Implement `codeIntelligence.ts` stub (subtask-001 behavior)
+3. Implement `testQA.ts` stub (subtask-002: fails on first call, passes on retry)
+4. Implement `debugReview.ts` stub (subtask-003 / recovery behavior)
+5. Implement `evidenceLedger.ts` (append-only, emits events on append)
+6. Implement `supervisor.ts` (full orchestration loop with retry logic)
+7. Implement SSE route in `routes/events.ts` with replay-on-connect
+8. Wire approval route in `routes/runs.ts`
+9. Write `tests/supervisor.integration.test.ts`
+10. Manual end-to-end test with curl confirming full demo sequence
 
-**Relevant Context:** `RunEvent` type from ST-02.
-
-**Status:** `[ ] pending`
+**Relevant Context:** Sections 3, 4, 5, 6, 7, 9.
 
 ---
 
-### ST-05: LLM Adapter Interface + Mock
-
-**Intent:** Decouple all agent logic from a specific LLM provider. The mock adapter drives the deterministic demo scenario.
+### Sub-Task 5: Frontend Scaffold + Store + API Client [ ] pending
+**Intent:** Create the Vite/React project, implement Zustand store, typed API client,
+and SSE connection manager. No UI polish yet — just the data layer.
 
 **Expected Outcomes:**
-- `LLMAdapter` interface defines `complete(prompt, schema) → Promise<T>`
-- `MockLLMAdapter` returns hardcoded demo-scenario responses keyed by prompt type
-- `OpenAIAdapter` implements the same interface (can be wired in later)
-- A factory `getLLMAdapter()` reads `process.env.DEMO_MODE` and returns the right adapter
+- `npm run dev` starts frontend on port 5173 with proxy to backend 3001
+- `useRunStore` correctly applies all SSE event types
+- `api/client.ts` typed fetch wrapper returns discriminated union (success/error)
+- `api/sse.ts` connects to stream, calls `applyEvent` on each message, reconnects on drop
+- Basic routing: `/` → NewRunPage, `/runs/:id` → RunDetailPage
 
 **Todo List:**
-- [ ] Create `backend/src/llm/types.ts` — `LLMAdapter<T>` interface
-- [ ] Create `backend/src/llm/mock-adapter.ts` — responses for planner, code agent, test agent (fail then pass), debug agent
-- [ ] Create `backend/src/llm/openai-adapter.ts` — real OpenAI call with zod parse + 1 retry
-- [ ] Create `backend/src/llm/index.ts` — `getLLMAdapter()` factory
+1. Create `frontend/package.json`: react, react-dom, zustand, react-router-dom; devDeps: vite, tailwindcss, @types/*
+2. Create `vite.config.ts` with `/api` proxy to localhost:3001
+3. Configure TailwindCSS
+4. Write `store/runStore.ts` Zustand store
+5. Write `api/client.ts` typed fetch wrapper
+6. Write `api/sse.ts` SSE manager
+7. Write `App.tsx` with router
+8. Write stub page components (empty but routable)
 
-**Relevant Context:** Demo scenario in section 9 of this plan defines the exact mock responses needed.
-
-**Status:** `[ ] pending`
+**Relevant Context:** Section 2 (Frontend Architecture), Section 6 (SSEEvent types).
 
 ---
 
-### ST-06: Agents
-
-**Intent:** Implement the three agents as pure async functions that accept typed input, call the LLM adapter, parse the response, and return typed output.
+### Sub-Task 6: Core UI — PipelineView + AgentCard + StatusBadge [ ] pending
+**Intent:** Build the primary demo screen. This is what evaluators will watch. Polish is
+critical here. Invest time in animations and visual clarity.
 
 **Expected Outcomes:**
-- `codeIntelligenceAgent(input)` returns `CodeAgentResult`
-- `testQAAgent(input)` returns `TestAgentResult`
-- `debugReviewAgent(input)` returns `ReviewAgentResult`
-- Each agent validates LLM output via Zod; returns `status: "error"` on parse failure
-- All prompts are co-located with their agent file
+- `RunDetailPage` shows PipelineView with 3 stage nodes connected by edges
+- Each `StageNode` shows: agent name, status ring (animated pulse when RUNNING), duration
+- `StatusBadge` has distinct colour + animation for all 5 states
+- `DependencyEdge` animates green when upstream completes
+- `AgentCard` expands on click showing full agent output
+- `LogStream` auto-scrolls with real-time appended entries
+- Layout is dark-themed, matches Linear/Vercel aesthetic
 
 **Todo List:**
-- [ ] Create `backend/src/agents/code-intelligence.ts`
-- [ ] Create `backend/src/agents/test-qa.ts`
-- [ ] Create `backend/src/agents/debug-review.ts`
-- [ ] Create `backend/src/agents/index.ts` — re-exports
-- [ ] Write Zod schemas for each agent output
+1. Implement `StatusBadge` with Tailwind animations
+2. Implement `StageNode` with status ring
+3. Implement `DependencyEdge` (SVG line with stroke-dashoffset animation)
+4. Implement `PipelineView` (positions nodes in dependency order using flexbox)
+5. Implement `AgentCard` (expandable detail panel)
+6. Implement `LogStream` (auto-scroll, monospace, colour-coded by event type)
+7. Assemble `RunDetailPage`
+8. Test against live backend: visual confirmation of all state transitions
 
-**Relevant Context:** Agent contracts from section 5 of this plan; LLM adapter from ST-05.
-
-**Status:** `[ ] pending`
+**Relevant Context:** Section 2 (Component Hierarchy, Polish Priorities).
 
 ---
 
-### ST-07: Supervisor State Machine
-
-**Intent:** Implement the orchestration engine that drives the full workflow: decompose → plan → execute → test → (recover) → review → await approval → complete.
+### Sub-Task 7: Remaining UI — NewRunPage + ApprovalBanner + EvidenceLedgerPage [ ] pending
+**Intent:** Complete the UI surface. The Approval flow is demo-critical.
 
 **Expected Outcomes:**
-- `Supervisor.run(runId, task)` drives the full state machine asynchronously
-- State transitions emit SSE events via `SSEBroadcaster`
-- Test failure triggers recovery with bounded retries (`MAX_RETRIES = 3`)
-- Every state transition is logged to the `EvidenceLedger`
-- `AWAITING_APPROVAL` blocks until `approve()` or `reject()` is called on the Supervisor instance
+- `NewRunPage` has polished task input with submit shortcut (Cmd+Enter)
+- On submit, navigates to RunDetailPage and opens SSE stream
+- `ApprovalBanner` is sticky, high-contrast, appears only in AWAITING_APPROVAL state,
+  buttons call PATCH /api/runs/:id/approve
+- `EvidenceLedgerPage` shows sortable table of all ledger entries with event type badges
+- `Sidebar` shows recent runs with status indicators
+- `TopBar` shows current run state and breadcrumb
 
 **Todo List:**
-- [ ] Create `backend/src/supervisor/states.ts` — `SupervisorState` enum + `isTerminalState()`
-- [ ] Create `backend/src/supervisor/planner.ts` — `decompose(task)` → calls LLM planner → returns `SubTask[]` with parallel groups
-- [ ] Create `backend/src/supervisor/scheduler.ts` — `executeGroup(subtasks, run)` → `Promise.allSettled()` over agents
-- [ ] Create `backend/src/supervisor/index.ts` — `Supervisor` class with `run()`, `approve()`, `reject()` methods
-- [ ] Wire `SSEBroadcaster`, `RunStore`, `EvidenceLedger` into Supervisor via constructor injection
+1. Implement `TaskInput` + `NewRunPage`
+2. Navigate-on-submit to RunDetailPage
+3. Implement `ApprovalBanner` (conditional render from store state)
+4. Implement `EvidenceLedgerPage` + `EvidenceTable`
+5. Implement `Sidebar` with run list
+6. Implement `TopBar`
+7. Wire `Layout` wrapping all pages
+8. Final visual pass: spacing, typography, dark theme consistency
 
-**Relevant Context:** State machine from section 4; handoff contracts from section 6; SSE events from ST-04.
-
-**Status:** `[ ] pending`
+**Relevant Context:** Section 2 (Component Hierarchy, Data Flow), Section 7 (PATCH endpoint).
 
 ---
 
-### ST-08: Run Routes
-
-**Intent:** Expose the full API surface so the frontend can start a run, stream events, approve, and query history.
+### Sub-Task 8: Tests, Error Handling, and Demo Hardening [ ] pending
+**Intent:** Ensure the demo never breaks. Add error boundaries, loading states, reconnect
+logic, and verify the full scenario runs cleanly from scratch.
 
 **Expected Outcomes:**
-- `POST /api/runs` creates a run, starts the Supervisor async, returns `202`
-- `GET /api/runs` returns run list
-- `GET /api/runs/:runId` returns full run detail
-- `GET /api/runs/:runId/stream` registers SSE connection
-- `POST /api/runs/:runId/approve` calls `supervisor.approve()`
-- `POST /api/runs/:runId/reject` calls `supervisor.reject(reason)`
-- `GET /api/runs/:runId/ledger` returns evidence entries
-- All 404/409/400 responses use the standard `ApiError` shape
+- All unit tests pass (`npm test`)
+- Frontend shows loading skeleton while SSE connects
+- SSE reconnects automatically if connection drops
+- API errors display inline (not console.error only)
+- React error boundary catches render failures
+- Full demo scenario runs clean 3 times in a row from `POST /api/runs`
+- README documents how to run the project locally
 
 **Todo List:**
-- [ ] Create `backend/src/routes/runs.ts` — all run-related routes
-- [ ] Mount routes in `server.ts`
-- [ ] Add `validateBody(schema)` middleware using Zod for request validation
-- [ ] Test all endpoints manually via curl or a `.http` file
+1. Add React error boundary to RunDetailPage
+2. Add loading skeleton to PipelineView
+3. Verify SSE reconnect in `api/sse.ts`
+4. Add inline error display to TaskInput
+5. Run full test suite; fix any failures
+6. Run demo scenario 3 times, confirm identical output each time
+7. Write README: prerequisites, `npm install`, `npm run dev` for both, demo instructions
 
-**Relevant Context:** API design from section 7; error conventions from section 7.
-
-**Status:** `[ ] pending`
+**Relevant Context:** Sections 3 (Failure Handling), 2 (Data Flow), 9 (Demo Scenario).
 
 ---
 
-### ST-09: Frontend Scaffold
+## Status Summary
 
-**Intent:** Get a React + Vite + Tailwind + shadcn/ui project running with the AppLayout shell.
-
-**Expected Outcomes:**
-- `npm run dev` starts frontend at port 5173 with hot reload
-- AppLayout renders with Sidebar + Header
-- React Router is configured with `/` and `/runs/:runId` routes
-- Tailwind + shadcn/ui tokens are configured (dark-capable color scheme)
-- API base URL proxied to `localhost:3001` in Vite config
-
-**Todo List:**
-- [ ] Create `frontend/package.json` with `react`, `react-dom`, `react-router-dom`, `zustand`, `@tanstack/react-query`, `react-hook-form`, `tailwindcss`, `shadcn/ui` deps
-- [ ] Create `frontend/vite.config.ts` with React plugin and proxy to backend
-- [ ] Create `frontend/tsconfig.json` (strict, path aliases)
-- [ ] Run `shadcn/ui` init, configure theme tokens (neutral gray + brand accent — electric indigo or slate-blue)
-- [ ] Create AppLayout, Sidebar, Header components
-- [ ] Create App.tsx with Router and routes
-
-**Relevant Context:** Component hierarchy from section 2.
-
-**Status:** `[ ] pending`
-
----
-
-### ST-10: Dashboard Page
-
-**Intent:** Give the user a landing page to submit tasks and see run history.
-
-**Expected Outcomes:**
-- `NewRunForm` validates input (min 10 chars) and calls `POST /api/runs`, then navigates to `/runs/:runId`
-- `RunHistoryList` shows all runs with status badge, task excerpt, and relative timestamp
-- Loading and error states are handled
-
-**Todo List:**
-- [ ] Create `frontend/src/api/client.ts` — fetch wrapper that normalizes `ApiError`
-- [ ] Create `frontend/src/api/runs.ts` — `useRuns()`, `useCreateRun()` React Query hooks
-- [ ] Create `NewRunForm.tsx` — textarea + submit button + validation
-- [ ] Create `RunHistoryList.tsx` — table/card list with `StatusBadge`
-- [ ] Create `DashboardPage.tsx`
-
-**Relevant Context:** API from ST-08; error conventions from section 7.
-
-**Status:** `[ ] pending`
-
----
-
-### ST-11: Run Detail Page — Live View
-
-**Intent:** The main demo screen. Shows the Supervisor state, agent lanes, evidence ledger, and approval gate in real time.
-
-**Expected Outcomes:**
-- `useRunStream` hook connects to SSE and dispatches events into Zustand store
-- `SupervisorPanel` shows current state with animated badge
-- `AgentLane` shows each agent with pulse animation while active, result card when done
-- `AgentLogStream` streams event log lines per agent
-- `EvidenceLedger` table updates live with slide-in animation
-- `ApprovalGate` appears when `approval_required` event arrives
-- Approve/Reject buttons work and update UI
-
-**Todo List:**
-- [ ] Create `frontend/src/store/run-store.ts` — Zustand store for `activeRun` state + `dispatch(event)` reducer
-- [ ] Create `frontend/src/hooks/useRunStream.ts` — `EventSource` hook
-- [ ] Create `RunHeader.tsx`, `SupervisorPanel.tsx`, `AgentLane.tsx`, `AgentLogStream.tsx`, `AgentResultCard.tsx`
-- [ ] Add syntax highlighting to `AgentResultCard` (Shiki or Prism)
-- [ ] Create `EvidenceLedger.tsx` with Tailwind transition on row entry
-- [ ] Create `ApprovalGate.tsx` with approve/reject + reason input
-- [ ] Wire everything into `RunDetailPage.tsx`
-
-**Relevant Context:** SSE events from section 6; component hierarchy from section 2; demo scenario from section 9.
-
-**Status:** `[ ] pending`
-
----
-
-### ST-12: Polish Pass
-
-**Intent:** Elevate the UI to "professional internal tool" quality for the live demo.
-
-**Expected Outcomes:**
-- Agent pulse animation (glowing ring) works during active state
-- State badge transitions use `transition-colors duration-300`
-- Evidence ledger rows animate in (`slide-down` + `fade-in`)
-- ApprovalGate has an attention-grabbing but tasteful animation
-- Run completion shows a success state; FAILED state shows red with reason
-- Typography, spacing, and color are consistent throughout
-- No layout shifts or flickering during SSE updates
-
-**Todo List:**
-- [ ] Define CSS animation utilities in `globals.css`: `pulse-ring`, `slide-down-fade-in`
-- [ ] Apply animations to `AgentLane`, `EvidenceLedger`, `ApprovalGate`
-- [ ] Audit color tokens — ensure status colors (success/warning/error/info) are consistent
-- [ ] Test the full demo scenario end-to-end and fix any visual glitches
-- [ ] Add empty states for dashboard and ledger
-
-**Relevant Context:** Polish priorities from section 2.
-
-**Status:** `[ ] pending`
-
----
-
-### ST-13: OpenAI Adapter + Live Mode
-
-**Intent:** Wire in real LLM calls so the system can handle tasks beyond the fixed demo scenario.
-
-**Expected Outcomes:**
-- `OpenAIAdapter` calls `gpt-4o` with structured output (JSON mode or function calling)
-- Zod validation on every response; retry once on parse failure
-- `DEMO_MODE=live` in `.env` switches the factory to `OpenAIAdapter`
-- `OPENAI_API_KEY` is read from environment; server errors gracefully if missing
-
-**Todo List:**
-- [ ] Implement `backend/src/llm/openai-adapter.ts`
-- [ ] Add timeout (30s) via `AbortController`
-- [ ] Create `backend/.env.example`
-- [ ] Test with the shopping cart scenario in live mode
-
-**Relevant Context:** LLM adapter interface from ST-05.
-
-**Status:** `[ ] pending`
-
----
-
-### ST-14: Hardening + Tests
-
-**Intent:** Make the codebase robust enough for a live demo without production infrastructure.
-
-**Expected Outcomes:**
-- Vitest unit tests for Supervisor state transitions (all happy path + test failure recovery)
-- Zod validation on all route request bodies (returns `400 VALIDATION_ERROR`)
-- SSE reconnection with `Last-Event-ID` header replays missed events
-- `process.on('unhandledRejection')` logs and marks affected run as FAILED
-- Frontend `ErrorBoundary` catches render errors
-- README documents how to run both frontend and backend
-
-**Todo List:**
-- [ ] Create `backend/tests/supervisor.test.ts` — state machine unit tests
-- [ ] Create `backend/tests/agents.test.ts` — agent output validation tests
-- [ ] Add `Last-Event-ID` support to SSE broadcaster
-- [ ] Add `process.on('unhandledRejection')` handler in `server.ts`
-- [ ] Create `frontend/src/components/ErrorBoundary.tsx`
-- [ ] Write `README.md` with setup + demo instructions
-
-**Relevant Context:** Demo scenario from section 9 (use as test fixture).
-
-**Status:** `[ ] pending`
-
----
-
-*End of plan — 14 sub-tasks covering full implementation from scaffold to hardening.*
+| Sub-Task | Description | Status |
+|---|---|---|
+| 1 | Shared Types & Contracts | [ ] pending |
+| 2 | Backend Scaffold + Store | [ ] pending |
+| 3 | State Machine + Decomposer + Scheduler | [ ] pending |
+| 4 | Agent Stubs + Supervisor + SSE | [ ] pending |
+| 5 | Frontend Scaffold + Store + API | [ ] pending |
+| 6 | Core UI — PipelineView + AgentCard | [ ] pending |
+| 7 | Remaining UI — NewRunPage + Approval | [ ] pending |
+| 8 | Tests + Error Handling + Demo Hardening | [ ] pending |

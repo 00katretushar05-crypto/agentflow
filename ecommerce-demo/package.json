@@ -1,0 +1,12 @@
+{
+  "name": "ecommerce-demo",
+  "version": "1.0.0",
+  "description": "Hackathon demo e-commerce app with a controlled bug for demonstration purposes.",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "jest --verbose"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0"
+  }
+}
