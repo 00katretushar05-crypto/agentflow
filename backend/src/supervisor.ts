@@ -85,10 +85,10 @@ export function getAllRunStates(): SupervisorTaskState[] {
 }
 
 /**
- * Returns the Evidence Ledger summary for a single run.
+ * Returns the Evidence Ledger summary and metrics for a single run.
  * Re-exported here so callers never need to import from the ledger module directly.
  */
-export { buildLedgerSummary } from './supervisor/evidenceLedger.js';
+export { buildLedgerSummary, buildMetrics } from './supervisor/evidenceLedger.js';
 
 /**
  * Registers the SSE emitter callback provided by the Express SSE route.
@@ -559,6 +559,14 @@ function storeResult(state: SupervisorTaskState, result: AgentResult): void {
   state.agentResults[result.agent as AgentName] = result;
   setAgentStatus(state, result.agent, result.status === 'SUCCESS' ? 'SUCCESS' : 'FAILURE', result.completedAt);
   state.updatedAt = result.completedAt;
+
+  // Accumulate TEST_QA totals so buildMetrics() can report cumulative counts
+  // across all dispatches (agentResults only retains the most-recent result).
+  if (result.agent === 'TEST_QA' && result.testResult) {
+    state._testsExecutedTotal = (state._testsExecutedTotal ?? 0) + result.testResult.totalTests;
+    state._failuresDetectedTotal = (state._failuresDetectedTotal ?? 0) + result.testResult.failed;
+  }
+
   emitSse(state.taskId, result);
 }
 

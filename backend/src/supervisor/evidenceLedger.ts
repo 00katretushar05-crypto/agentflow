@@ -27,6 +27,7 @@ import type {
   VerificationResult,
   FailureReport,
   AgentResult,
+  TaskMetrics,
 } from '../types/contracts.js';
 
 // ---------------------------------------------------------------------------
@@ -176,6 +177,72 @@ export function buildFailureReport(state: SupervisorTaskState): FailureReport | 
     relevantCode,
     rootCause,
     confidence,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Metrics
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the TaskMetrics snapshot from actual execution data stored in state.
+ * Pure function — no side effects, no I/O.
+ *
+ * Metrics derivation:
+ *   coordinationSteps   — one per StateTransition recorded in history
+ *   manualInterventions — count of AWAITING_APPROVAL → VERIFIED transitions
+ *   contextSwitches     — count of distinct agent results stored (each = one dispatch)
+ *   testsExecuted       — cumulative from _testsExecutedTotal accumulator
+ *   failuresDetected    — cumulative from _failuresDetectedTotal accumulator
+ *   recoveryAttempts    — state.retryCount (incremented once per RECOVERING entry)
+ *   timeToVerifiedMs    — createdAt → updatedAt when status is VERIFIED, else null
+ */
+export function buildMetrics(state: SupervisorTaskState): TaskMetrics {
+  // coordinationSteps: each applyTransition() appends one entry to history.
+  const coordinationSteps = state.history.length;
+
+  // manualInterventions: count transitions where a human approved
+  // (AWAITING_APPROVAL → VERIFIED is the only manual gate in the pipeline).
+  const manualInterventions = state.history.filter(
+    (tx) => tx.from === 'AWAITING_APPROVAL' && tx.to === 'VERIFIED',
+  ).length;
+
+  // contextSwitches: one per agent result store call — CODE_INTELLIGENCE,
+  // TEST_QA (initial analysis), and then each recovery loop adds one
+  // DEBUG_REVIEW + one TEST_QA retest.  agentResults is overwritten on each
+  // dispatch, so we derive from agentResultCount + recovery-added dispatches.
+  const agentResultCount = Object.values(state.agentResults).filter(Boolean).length;
+  // Each recovery iteration adds DEBUG_REVIEW + TEST_QA (2 extra dispatches).
+  const contextSwitches = agentResultCount + (state.retryCount * 2);
+
+  // testsExecuted / failuresDetected: use accumulators for accuracy across
+  // multiple TEST_QA dispatches; fall back to latest result if accumulator
+  // was never written (e.g., a run with no TEST_QA results yet).
+  const cumulativeTests = state._testsExecutedTotal ?? 0;
+  const testsExecuted = cumulativeTests > 0
+    ? cumulativeTests
+    : (state.agentResults['TEST_QA']?.testResult?.totalTests ?? 0);
+
+  const failuresDetected = (state._failuresDetectedTotal ?? 0) > 0
+    ? state._failuresDetectedTotal ?? 0
+    : (state.agentResults['TEST_QA']?.testResult?.failed ?? 0);
+
+  // recoveryAttempts: retryCount is already incremented once per RECOVERING entry.
+  const recoveryAttempts = state.retryCount;
+
+  // timeToVerifiedMs: only set when the task has reached VERIFIED.
+  const timeToVerifiedMs = state.status === 'VERIFIED'
+    ? Date.parse(state.updatedAt) - Date.parse(state.createdAt)
+    : null;
+
+  return {
+    coordinationSteps,
+    manualInterventions,
+    contextSwitches,
+    testsExecuted,
+    failuresDetected,
+    recoveryAttempts,
+    timeToVerifiedMs,
   };
 }
 
