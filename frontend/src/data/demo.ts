@@ -14,11 +14,11 @@ export type SupervisorState =
   | "AWAITING_APPROVAL"
   | "VERIFIED";
 
-/** Per-agent status from agentStatus map */
-export type AgentRunStatus = "PENDING" | "IN_PROGRESS" | "DONE";
+/** Per-agent status from agentStatus array — real API values */
+export type AgentRunStatus = "SUCCESS" | "FAILURE" | "PARTIAL" | "SKIPPED";
 
 /** UI-side agent status (used by AgentCard for visual states) */
-export type AgentStatus = "IDLE" | "ACTIVE" | "THINKING" | "ERROR" | "DONE";
+export type AgentStatus = "IDLE" | "ACTIVE" | "THINKING" | "ERROR" | "DONE" | "PARTIAL" | "SKIPPED";
 
 export type RiskLevel = "LOW" | "MEDIUM" | "HIGH" | "CRITICAL";
 export type EvidenceStatus = "PASS" | "FAIL" | "IN_PROGRESS" | "PENDING";
@@ -32,11 +32,26 @@ export interface HistoryEntry {
   timestamp: string;
 }
 
+/** Single entry from the agentStatus array */
+export interface AgentStatusEntry {
+  agent: string;
+  status: AgentRunStatus;
+  updatedAt: string;
+}
+
 export interface AgentFindings {
   affectedFiles: string[];
   affectedFunctions: string[];
   riskLevel: string;
   recommendation: string;
+}
+
+export interface TestResult {
+  totalTests: number;
+  passed: number;
+  failed: number;
+  failures: string[];
+  executedAt: string;
 }
 
 export interface AgentResult {
@@ -46,14 +61,44 @@ export interface AgentResult {
     taskId: string;
     agent: string;
     goal: string;
+    context?: Record<string, unknown>;
     assignedAt: string;
   };
-  findings: AgentFindings;
+  /** CODE_INTELLIGENCE findings */
+  findings?: AgentFindings;
+  /** TEST_QA test results */
+  testResult?: TestResult;
+  /** DEBUG_REVIEW failure report */
+  failureReport?: {
+    testFailure: string;
+    stackTrace: string;
+    relevantCode: string;
+    rootCause: string;
+    confidence: string;
+  };
   filesExamined: string[];
   filesModified: string[];
+  proposedModifications?: string[];
   confidence: string;
   recommendedNextAction: string;
   completedAt: string;
+}
+
+export interface Verification {
+  requirementsMet: boolean;
+  testsExecuted: number;
+  testsPassed: number;
+  regressionPassed: boolean;
+  codeReviewed: boolean;
+}
+
+export interface RiskAssessment {
+  filesAffected: number;
+  functionsAffected: number;
+  testsCovered: number;
+  dependencyImpact: string;
+  riskPercent: number;
+  recommendation: string;
 }
 
 export interface TaskDetail {
@@ -61,28 +106,30 @@ export interface TaskDetail {
   goal: string;
   status: SupervisorState;
   history: HistoryEntry[];
-  agentStatus: Record<string, AgentRunStatus>;
+  /** Real API: array of { agent, status, updatedAt } */
+  agentStatus: AgentStatusEntry[];
   agentResults: Record<string, AgentResult | null>;
   retryCount: number;
   maxRetries: number;
-  verification: unknown;
-  risk: RiskLevel | null;
+  verification: Verification | null;
+  riskAssessment: RiskAssessment | null;
   createdAt: string;
   updatedAt: string;
 }
 
 // ─── GET /api/task/:id/evidence ────────────────────────────────────────────────
 
-export interface EvidenceItem {
-  label: string;
-  status: EvidenceStatus;
-  detail: string | null;
+export interface EvidenceLogItem {
+  seq: number;
+  type: "TRANSITION" | "AGENT_RESULT" | string;
+  timestamp: string;
+  summary: string;
+  payload?: unknown;
 }
 
 export interface EvidenceResponse {
   taskId: string;
-  items: EvidenceItem[];
-  updatedAt: string;
+  items: EvidenceLogItem[];
 }
 
 // ─── GET /api/tasks ────────────────────────────────────────────────────────────
@@ -155,94 +202,241 @@ export function supervisorStateToStage(state: SupervisorState): WorkflowStage {
 // ─── Mock: GET /api/task/:id ───────────────────────────────────────────────────
 
 export const MOCK_TASK: TaskDetail = {
-  taskId: "AF-1024",
+  taskId: "322a7d8f-5536-451a-92ec-ad5b74c9c7fc",
   goal: "Add a 10% discount for premium customers without breaking checkout",
-  status: "TESTING",
+  status: "AWAITING_APPROVAL",
   history: [
     {
       from: "RECEIVED",
+      to: "RECEIVED",
+      reason: "Task created with goal: \"Add a 10% discount for premium customers without breaking checkout\"",
+      timestamp: "2026-09-27T04:34:12.143Z",
+    },
+    {
+      from: "RECEIVED",
       to: "PLANNING",
-      reason: "Task received, preparing decomposition",
-      timestamp: "2026-09-26T10:00:00.000Z",
+      reason: "Supervisor accepted the task and is decomposing it into subtasks.",
+      timestamp: "2026-09-27T04:34:12.155Z",
     },
     {
       from: "PLANNING",
       to: "ANALYZING",
-      reason: "Agents assigned: CODE_INTELLIGENCE, TEST_QA",
-      timestamp: "2026-09-26T10:00:04.000Z",
+      reason: "Task decomposed into 3 subtasks: CODE_INTELLIGENCE, TEST_QA, DEBUG_REVIEW.",
+      timestamp: "2026-09-27T04:34:12.155Z",
     },
     {
       from: "ANALYZING",
       to: "IMPLEMENTING",
-      reason: "Both agents returned findings — 2 files, 2 functions affected",
-      timestamp: "2026-09-26T10:00:15.000Z",
+      reason: "Code Intelligence analysis complete. Proceeding to implementation phase.",
+      timestamp: "2026-09-27T04:34:30.911Z",
     },
     {
       from: "IMPLEMENTING",
       to: "TESTING",
-      reason: "Implementation complete, running tests",
-      timestamp: "2026-09-26T10:00:28.000Z",
+      reason: "Implementation complete. Running test suite to verify correctness.",
+      timestamp: "2026-09-27T04:34:31.413Z",
+    },
+    {
+      from: "TESTING",
+      to: "FAILED",
+      reason: "TEST_QA reported 1 test failure(s): getDiscount — integration via checkout should give premium customers a 10% discount via checkout",
+      timestamp: "2026-09-27T04:34:32.787Z",
+    },
+    {
+      from: "FAILED",
+      to: "RECOVERING",
+      reason: "Recovery attempt 1/2. Dispatching DEBUG_REVIEW agent to diagnose failure.",
+      timestamp: "2026-09-27T04:34:32.787Z",
+    },
+    {
+      from: "RECOVERING",
+      to: "RETESTING",
+      reason: "DEBUG_REVIEW complete. Root cause: \"Field-name mismatch between checkout.js and discountService.js: checkout.js passes { type: customer.type } to getDiscount(), but discountService.js checks customer.membership. Because membership is always undefined at runtime, the premium branch is never entered and premium customers receive 0% discount instead of 10%.\n\nProposed minimal fix: In src/checkout/checkout.js, change:\n  getDiscount({ type: customer.type })\nto:\n  getDiscount({ membership: customer.type })\". Re-running test suite.",
+      timestamp: "2026-09-27T04:34:32.790Z",
+    },
+    {
+      from: "RETESTING",
+      to: "VERIFYING",
+      reason: "All 10 tests passed after recovery attempt 1. Proceeding to verification.",
+      timestamp: "2026-09-27T04:34:33.945Z",
+    },
+    {
+      from: "VERIFYING",
+      to: "AWAITING_APPROVAL",
+      reason: "Verification passed: all 10 tests pass, regression clear, requirements met. Waiting for human approval before marking VERIFIED. Note: this run required 1 recovery attempt(s) — review DEBUG_REVIEW's diagnosis before approving.",
+      timestamp: "2026-09-27T04:34:34.253Z",
     },
   ],
-  agentStatus: {
-    CODE_INTELLIGENCE: "DONE",
-    TEST_QA: "IN_PROGRESS",
-    DEBUG_REVIEW: "PENDING",
-  },
+  agentStatus: [
+    { agent: "CODE_INTELLIGENCE", status: "SUCCESS", updatedAt: "2026-09-27T04:34:12.208Z" },
+    { agent: "TEST_QA", status: "SUCCESS", updatedAt: "2026-09-27T04:34:33.945Z" },
+    { agent: "DEBUG_REVIEW", status: "SUCCESS", updatedAt: "2026-09-27T04:34:32.790Z" },
+  ],
   agentResults: {
     CODE_INTELLIGENCE: {
       agent: "CODE_INTELLIGENCE",
       status: "SUCCESS",
       task: {
-        taskId: "AF-1024",
+        taskId: "322a7d8f-5536-451a-92ec-ad5b74c9c7fc:CODE_INTELLIGENCE:dbc56519-7224-48a5-bac8-6cce3f7398ab",
         agent: "CODE_INTELLIGENCE",
-        goal: "Analyze impact of adding premium discount",
-        assignedAt: "2026-09-26T10:00:04.000Z",
+        goal: "Analyse the codebase to understand the current implementation relevant to adding premium discount.",
+        context: { phase: "analysis" },
+        assignedAt: "2026-09-27T04:34:12.155Z",
       },
       findings: {
         affectedFiles: [
           "src/checkout/checkout.js",
           "src/discounts/discountService.js",
+          "src/orders/orderService.js",
+          "src/users/userService.js",
         ],
-        affectedFunctions: ["calculateDiscount", "processCheckout"],
+        affectedFunctions: ["checkout", "getDiscount", "createOrder", "getUserById"],
         riskLevel: "MEDIUM",
-        recommendation: "Modify discount calculation and add regression tests.",
+        recommendation: "4 file(s) are relevant. Dependency edges: src/checkout/checkout.js → [src/discounts/discountService.js, src/orders/orderService.js, src/users/userService.js]. Risk is MEDIUM — review all callers before modifying shared services.",
       },
       filesExamined: [
         "src/checkout/checkout.js",
         "src/discounts/discountService.js",
+        "src/orders/orderService.js",
+        "src/users/userService.js",
+      ],
+      filesModified: [],
+      proposedModifications: [
+        "src/checkout/checkout.js",
+        "src/discounts/discountService.js",
+        "src/orders/orderService.js",
+        "src/users/userService.js",
+      ],
+      confidence: "MEDIUM",
+      recommendedNextAction: "Proceed to Test & QA analysis.",
+      completedAt: "2026-09-27T04:34:12.208Z",
+    },
+    TEST_QA: {
+      agent: "TEST_QA",
+      status: "SUCCESS",
+      task: {
+        taskId: "322a7d8f-5536-451a-92ec-ad5b74c9c7fc:TEST_QA:9f98f6e9-5ffb-474c-8586-a0f3c3749417",
+        agent: "TEST_QA",
+        goal: "Run the full test suite and provide a pass/fail baseline.",
+        context: { phase: "baseline-testing", retryCount: 1 },
+        assignedAt: "2026-09-27T04:34:32.790Z",
+      },
+      testResult: {
+        totalTests: 10,
+        passed: 10,
+        failed: 0,
+        failures: [],
+        executedAt: "2026-09-27T04:34:33.944Z",
+      },
+      filesExamined: [
+        "tests/checkout.test.js",
+        "tests/discount.test.js",
+        "tests/order.test.js",
       ],
       filesModified: [],
       confidence: "HIGH",
-      recommendedNextAction: "Proceed to implementation",
-      completedAt: "2026-09-26T10:00:12.000Z",
+      recommendedNextAction: "All tests pass.",
+      completedAt: "2026-09-27T04:34:33.945Z",
     },
-    TEST_QA: null,
-    DEBUG_REVIEW: null,
+    DEBUG_REVIEW: {
+      agent: "DEBUG_REVIEW",
+      status: "SUCCESS",
+      task: {
+        taskId: "322a7d8f-5536-451a-92ec-ad5b74c9c7fc:DEBUG_REVIEW:384984c0-8bfe-4bc1-83a2-6fd5072e547a",
+        agent: "DEBUG_REVIEW",
+        goal: "If tests fail after implementation, diagnose root cause and propose a fix.",
+        context: { phase: "post-implementation-debug" },
+        assignedAt: "2026-09-27T04:34:32.787Z",
+      },
+      failureReport: {
+        testFailure: "getDiscount — integration via checkout should give premium customers a 10% discount via checkout",
+        stackTrace: "Expected: 10\nReceived: 0",
+        relevantCode: "FAIL  getDiscount — integration via checkout should give premium customers a 10% discount via checkout\n  Expected: 10\n  Received: 0",
+        rootCause: "Field-name mismatch between checkout.js and discountService.js: checkout.js passes { type: customer.type } to getDiscount(), but discountService.js checks customer.membership. Because membership is always undefined at runtime, the premium branch is never entered and premium customers receive 0% discount instead of 10%.\n\nProposed minimal fix: In src/checkout/checkout.js, change:\n  getDiscount({ type: customer.type })\nto:\n  getDiscount({ membership: customer.type })",
+        confidence: "HIGH",
+      },
+      filesExamined: ["src/checkout/checkout.js", "src/discounts/discountService.js"],
+      filesModified: ["src/checkout/checkout.js"],
+      confidence: "HIGH",
+      recommendedNextAction: "Fix applied — rerun TEST_QA to confirm the regression is resolved.",
+      completedAt: "2026-09-27T04:34:32.790Z",
+    },
   },
-  retryCount: 0,
-  maxRetries: 3,
-  verification: null,
-  risk: "MEDIUM",
-  createdAt: "2026-09-26T10:00:00.000Z",
-  updatedAt: "2026-09-26T10:00:28.000Z",
+  retryCount: 1,
+  maxRetries: 2,
+  verification: {
+    requirementsMet: true,
+    testsExecuted: 10,
+    testsPassed: 10,
+    regressionPassed: true,
+    codeReviewed: true,
+  },
+  riskAssessment: {
+    filesAffected: 4,
+    functionsAffected: 4,
+    testsCovered: 10,
+    dependencyImpact: "MEDIUM",
+    riskPercent: 75,
+    recommendation: "High risk: manual review required before proceeding.",
+  },
+  createdAt: "2026-09-27T04:34:12.143Z",
+  updatedAt: "2026-09-27T04:34:34.253Z",
 };
 
 // ─── Mock: GET /api/task/:id/evidence ─────────────────────────────────────────
 
 export const MOCK_EVIDENCE: EvidenceResponse = {
-  taskId: "AF-1024",
+  taskId: "322a7d8f-5536-451a-92ec-ad5b74c9c7fc",
   items: [
-    { label: "Requirement", status: "PASS", detail: "Requirement understood and decomposed" },
-    { label: "Impact Analysis", status: "PASS", detail: "2 files, 2 functions identified" },
-    { label: "Files Changed", status: "PASS", detail: "3" },
-    { label: "Tests Executed", status: "IN_PROGRESS", detail: "11" },
-    { label: "Tests Passed", status: "PENDING", detail: null },
-    { label: "Regression", status: "PENDING", detail: null },
-    { label: "Code Review", status: "PENDING", detail: null },
-    { label: "Human Approval", status: "PENDING", detail: null },
+    {
+      seq: 1,
+      type: "TRANSITION",
+      timestamp: "2026-09-27T04:34:12.143Z",
+      summary: "Task created with goal: \"Add a 10% discount for premium customers without breaking checkout\"",
+    },
+    {
+      seq: 2,
+      type: "TRANSITION",
+      timestamp: "2026-09-27T04:34:12.155Z",
+      summary: "Supervisor accepted the task and is decomposing it into subtasks.",
+    },
+    {
+      seq: 3,
+      type: "AGENT_RESULT",
+      timestamp: "2026-09-27T04:34:12.208Z",
+      summary: "CODE_INTELLIGENCE completed analysis. 4 files affected, risk MEDIUM.",
+    },
+    {
+      seq: 4,
+      type: "TRANSITION",
+      timestamp: "2026-09-27T04:34:31.413Z",
+      summary: "Implementation complete. Running test suite to verify correctness.",
+    },
+    {
+      seq: 5,
+      type: "AGENT_RESULT",
+      timestamp: "2026-09-27T04:34:32.787Z",
+      summary: "TEST_QA reported 1 failure: getDiscount — integration via checkout.",
+    },
+    {
+      seq: 6,
+      type: "AGENT_RESULT",
+      timestamp: "2026-09-27T04:34:32.790Z",
+      summary: "DEBUG_REVIEW identified field-name mismatch. Fix applied to src/checkout/checkout.js.",
+    },
+    {
+      seq: 7,
+      type: "AGENT_RESULT",
+      timestamp: "2026-09-27T04:34:33.945Z",
+      summary: "TEST_QA re-run: 10/10 tests passed after recovery.",
+    },
+    {
+      seq: 8,
+      type: "TRANSITION",
+      timestamp: "2026-09-27T04:34:34.253Z",
+      summary: "Verification passed. Awaiting human approval.",
+    },
   ],
-  updatedAt: "2026-09-26T10:00:28.000Z",
 };
 
 // ─── Mock: GET /api/tasks ──────────────────────────────────────────────────────
@@ -250,11 +444,11 @@ export const MOCK_EVIDENCE: EvidenceResponse = {
 export const MOCK_TASKS: TasksResponse = {
   tasks: [
     {
-      taskId: "AF-1024",
+      taskId: "322a7d8f-5536-451a-92ec-ad5b74c9c7fc",
       goal: "Add premium customer discount",
-      status: "TESTING",
-      createdAt: "2026-09-26T10:00:00.000Z",
-      updatedAt: "2026-09-26T10:00:28.000Z",
+      status: "AWAITING_APPROVAL",
+      createdAt: "2026-09-27T04:34:12.143Z",
+      updatedAt: "2026-09-27T04:34:34.253Z",
     },
     {
       taskId: "AF-1023",
@@ -290,7 +484,7 @@ export const AGENT_META: Record<string, Omit<Agent, "status">> = {
     role: "Analysis & Impact Mapping",
     model: "Claude 3.7 Sonnet",
     tasksCompleted: 312,
-    currentTask: "Analyze impact of adding premium discount",
+    currentTask: "Analyse impact of adding premium discount",
     lastActive: "just now",
     successRate: 94.7,
   },
@@ -316,11 +510,13 @@ export const AGENT_META: Record<string, Omit<Agent, "status">> = {
   },
 };
 
-/** Maps API agentStatus → UI AgentStatus */
+/** Maps real API agentStatus → UI AgentStatus */
 export function toAgentStatus(s: AgentRunStatus): AgentStatus {
-  if (s === "DONE") return "DONE";
-  if (s === "IN_PROGRESS") return "THINKING";
-  return "IDLE"; // PENDING
+  if (s === "SUCCESS") return "DONE";
+  if (s === "FAILURE") return "ERROR";
+  if (s === "PARTIAL") return "PARTIAL";
+  if (s === "SKIPPED") return "SKIPPED";
+  return "IDLE";
 }
 
 // ─── Workflow Stages ────────────────────────────────────────────────────────────
@@ -336,20 +532,14 @@ export const WORKFLOW_STAGES: WorkflowStage[] = [
 
 // ─── Code Diff (unchanged visual demo) ────────────────────────────────────────
 
-export const CODE_DIFF = `--- a/src/discounts/discountService.js
-+++ b/src/discounts/discountService.js
-@@ -12,6 +12,14 @@
+export const CODE_DIFF = `--- a/src/checkout/checkout.js
++++ b/src/checkout/checkout.js
+@@ -18,7 +18,7 @@
  
- export function calculateDiscount(customer, cartTotal) {
--  return 0;
-+  const isPremium = customer.tier === 'PREMIUM';
-+  if (isPremium) {
-+    return cartTotal * 0.10;
-+  }
-+  return 0;
- }
- 
-+export function applyDiscount(customer, cartTotal) {
-+  const discount = calculateDiscount(customer, cartTotal);
-+  return { total: cartTotal - discount, discount };
-+}`;
+ async function checkout(userId, cart) {
+   const user = await getUserById(userId);
+-  const discount = getDiscount({ type: customer.type });
++  const discount = getDiscount({ membership: customer.type });
+   const order = await createOrder(user, cart, discount);
+   return order;
+ }`;

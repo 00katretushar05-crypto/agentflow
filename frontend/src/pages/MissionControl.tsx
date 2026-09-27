@@ -138,23 +138,23 @@ export function MissionControl() {
 
   // ── Derived values (task is loaded) ───────────────────────────────────────
   const stage: WorkflowStage = supervisorStateToStage(task.status);
-  const agentStatuses = task.agentStatus ?? {};
+
+  // agentStatus is now an array
+  const agentStatusList = task.agentStatus ?? [];
 
   const ciResult = task.agentResults?.["CODE_INTELLIGENCE"];
   const filesChanged = ciResult?.findings?.affectedFiles?.length ?? 0;
 
-  // Derive test counts from evidence-like data; fallback to "—" until testing stage
-  const testingStarted =
-    task.status === "TESTING" ||
-    task.status === "RETESTING" ||
-    task.status === "RECOVERING" ||
-    task.status === "VERIFYING" ||
-    task.status === "AWAITING_APPROVAL" ||
-    task.status === "VERIFIED";
+  // Pull real test counts from verification or TEST_QA result
+  const verification = task.verification;
+  const qaResult = task.agentResults?.["TEST_QA"];
+  const testsExecuted =
+    verification?.testsExecuted ?? qaResult?.testResult?.totalTests ?? null;
   const testsPassed =
-    task.status === "VERIFYING" ||
-    task.status === "AWAITING_APPROVAL" ||
-    task.status === "VERIFIED";
+    verification?.testsPassed ?? qaResult?.testResult?.passed ?? null;
+
+  // Risk gauge: prefer riskAssessment from API, fall back to nothing
+  const riskAssessment = task.riskAssessment;
 
   const feedEntries = historyToActivityEntries(task.history ?? []) as RichActivityEntry[];
   const latestHistory = task.history?.[task.history.length - 1];
@@ -265,24 +265,24 @@ export function MissionControl() {
           <h2 className="text-[10px] tracking-widest text-white/25 uppercase font-semibold">
             Active Agents
           </h2>
-          {Object.entries(agentStatuses).map(([agentId, runStatus]) => {
+          {agentStatusList.map(({ agent: agentId, status: runStatus }) => {
             const meta = AGENT_META[agentId];
             if (!meta) return null;
             const uiStatus = toAgentStatus(runStatus);
-            const agent = { ...meta, status: uiStatus };
+            const agentObj = { ...meta, status: uiStatus };
             const agentResult =
-              runStatus === "DONE" ? (task.agentResults?.[agentId] ?? null) : null;
+              runStatus === "SUCCESS" ? (task.agentResults?.[agentId] ?? null) : null;
             return (
               <AgentCard
                 key={agentId}
-                agent={agent}
+                agent={agentObj}
                 agentRunStatus={runStatus}
                 agentResult={agentResult}
-                highlight={runStatus === "IN_PROGRESS"}
+                highlight={runStatus === "PARTIAL"}
               />
             );
           })}
-          {Object.keys(agentStatuses).length === 0 && (
+          {agentStatusList.length === 0 && (
             <p className="text-[12px] text-white/25 italic">No agents assigned yet.</p>
           )}
         </div>
@@ -300,19 +300,39 @@ export function MissionControl() {
             <StatCard
               icon={<FlaskConical className="w-4 h-4 text-cyan-400" />}
               label="Tests Run"
-              value={testingStarted ? "—" : "—"}
+              value={testsExecuted !== null ? String(testsExecuted) : "—"}
               color="cyan"
             />
             <StatCard
               icon={<CheckCircle2 className="w-4 h-4 text-emerald-400" />}
               label="Tests Passed"
-              value={testsPassed ? "—" : "—"}
+              value={testsPassed !== null ? String(testsPassed) : "—"}
               color="emerald"
             />
             <div className="rounded-xl border border-white/[0.07] bg-[#111318] p-4 flex flex-col items-center justify-center gap-1">
-              <RiskGauge level={task.risk ?? "MEDIUM"} showLabel />
+              {riskAssessment ? (
+                <>
+                  <RiskGauge
+                    riskPercent={riskAssessment.riskPercent}
+                    dependencyImpact={riskAssessment.dependencyImpact}
+                    showLabel
+                  />
+                </>
+              ) : (
+                <RiskGauge level="MEDIUM" showLabel />
+              )}
             </div>
           </div>
+
+          {/* Risk recommendation (when available) */}
+          {riskAssessment?.recommendation && (
+            <div className="rounded-xl border border-white/[0.07] bg-[#111318] px-4 py-3 flex items-start gap-2.5">
+              <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+              <p className="text-[12px] text-white/50 leading-relaxed">
+                {riskAssessment.recommendation}
+              </p>
+            </div>
+          )}
 
           {/* Supervisor Status */}
           <div className={`rounded-xl border p-4 ${
@@ -358,7 +378,7 @@ export function MissionControl() {
               {activeTab === "feed" ? (
                 <ActivityFeed entries={feedEntries} maxHeight="280px" />
               ) : (
-                <CodeDiff diff={CODE_DIFF} filename="src/discounts/discountService.js" />
+                <CodeDiff diff={CODE_DIFF} filename="src/checkout/checkout.js" />
               )}
             </div>
           </div>

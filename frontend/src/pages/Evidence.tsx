@@ -118,10 +118,26 @@ export function Evidence() {
   }
 
   // ── Derived ────────────────────────────────────────────────────────────────
-  const passed = evidence.items.filter((e) => e.status === "PASS").length;
-  const total = evidence.items.length;
+  const verification = task.verification;
+  const riskAssessment = task.riskAssessment;
   const ciResult = task.agentResults?.["CODE_INTELLIGENCE"];
   const filesChanged = ciResult?.findings?.affectedFiles?.length ?? 0;
+
+  // Evidence score: count passing checklist items if verification exists
+  const checklistTotal = verification ? 5 : 0;
+  const checklistPassed = verification
+    ? [
+        verification.requirementsMet,
+        verification.testsExecuted > 0,
+        verification.testsPassed === verification.testsExecuted,
+        verification.regressionPassed,
+        verification.codeReviewed,
+      ].filter(Boolean).length
+    : 0;
+
+  const testsExecuted = verification?.testsExecuted ?? null;
+  const testsPassed = verification?.testsPassed ?? null;
+
   const isVerified = task.status === "VERIFIED" || approved;
   const isFailed = task.status === "FAILED";
   const canApprove = task.status === "AWAITING_APPROVAL" && !approved;
@@ -161,8 +177,8 @@ export function Evidence() {
             <div>
               <p className="text-[11px] text-white/30 uppercase tracking-wide">Evidence Score</p>
               <p className="text-[22px] font-bold text-white/90">
-                {passed}
-                <span className="text-[14px] text-white/30">/{total}</span>
+                {checklistPassed}
+                <span className="text-[14px] text-white/30">/{checklistTotal}</span>
               </p>
             </div>
           </div>
@@ -171,26 +187,41 @@ export function Evidence() {
           <div className="flex-1 max-w-xs space-y-1.5">
             <div className="flex justify-between text-[10px] text-white/30">
               <span>Completion</span>
-              <span>{total > 0 ? Math.round((passed / total) * 100) : 0}%</span>
+              <span>{checklistTotal > 0 ? Math.round((checklistPassed / checklistTotal) * 100) : 0}%</span>
             </div>
             <div className="h-1.5 rounded-full bg-white/[0.07] overflow-hidden">
               <div
                 className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-emerald-500 transition-all duration-700"
-                style={{ width: total > 0 ? `${(passed / total) * 100}%` : "0%" }}
+                style={{ width: checklistTotal > 0 ? `${(checklistPassed / checklistTotal) * 100}%` : "0%" }}
               />
             </div>
           </div>
 
-          <RiskGauge level={task.risk ?? "MEDIUM"} showLabel />
+          {riskAssessment ? (
+            <RiskGauge
+              riskPercent={riskAssessment.riskPercent}
+              dependencyImpact={riskAssessment.dependencyImpact}
+              showLabel
+            />
+          ) : (
+            <RiskGauge level="MEDIUM" showLabel />
+          )}
         </div>
+
+        {/* Risk recommendation */}
+        {riskAssessment?.recommendation && (
+          <p className="mt-3 pt-3 border-t border-white/[0.05] text-[12px] text-white/40 leading-relaxed">
+            {riskAssessment.recommendation}
+          </p>
+        )}
       </div>
 
       {/* Stats */}
       <div className="grid grid-cols-3 gap-3">
         {[
           { label: "Files Changed", value: filesChanged > 0 ? filesChanged : "—" },
-          { label: "Tests Run", value: "—" },
-          { label: "Tests Passed", value: "—" },
+          { label: "Tests Run", value: testsExecuted !== null ? testsExecuted : "—" },
+          { label: "Tests Passed", value: testsPassed !== null ? testsPassed : "—" },
         ].map((s) => (
           <div
             key={s.label}
@@ -202,13 +233,11 @@ export function Evidence() {
         ))}
       </div>
 
-      {/* Evidence Items */}
-      <div className="space-y-2">
-        <h2 className="text-[10px] tracking-widest text-white/25 uppercase font-semibold mb-4">
-          Verification Checklist
-        </h2>
-        <EvidenceLedger items={evidence.items} />
-      </div>
+      {/* EvidenceLedger: verification checklist + evidence log */}
+      <EvidenceLedger
+        verification={verification}
+        logItems={evidence.items}
+      />
 
       {/* FAILED message */}
       {isFailed && (

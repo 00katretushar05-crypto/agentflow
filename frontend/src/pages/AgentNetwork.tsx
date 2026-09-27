@@ -29,6 +29,8 @@ const STATUS_COLORS: Record<AgentStatus, string> = {
   IDLE:     "rgba(255,255,255,0.15)",
   ERROR:    "#f87171",
   DONE:     "#38bdf8",
+  PARTIAL:  "#fbbf24",
+  SKIPPED:  "rgba(255,255,255,0.15)",
 };
 
 function ConnectionLine({
@@ -69,9 +71,9 @@ export function AgentNetwork() {
   const [selected, setSelected] = useState<string | null>("CODE_INTELLIGENCE");
   const navigate = useNavigate();
 
-  // Build agent list from agentStatus map + AGENT_META
-  const agents: Agent[] = Object.entries(MOCK_TASK.agentStatus).map(
-    ([id, runStatus]) => ({
+  // Build agent list from agentStatus array + AGENT_META
+  const agents: Agent[] = MOCK_TASK.agentStatus.map(
+    ({ agent: id, status: runStatus }) => ({
       ...AGENT_META[id],
       status: toAgentStatus(runStatus),
     })
