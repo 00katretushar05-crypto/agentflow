@@ -15,13 +15,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { execSync } from 'child_process';
-import { fileURLToPath } from 'node:url';
 import type { AgentTask, AgentResult, FailureReport } from '../types/contracts.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo');
+import { ECOMMERCE_ROOT as REPO_ROOT } from '../utils/repoRoot.js';
 
 // ---------------------------------------------------------------------------
 // Run Jest and collect structured failure evidence

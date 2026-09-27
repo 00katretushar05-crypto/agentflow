@@ -9,17 +9,12 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as childProcess from 'child_process';
-import { fileURLToPath } from 'node:url';
 import type { AgentTask, AgentResult, TestResult } from '../types/contracts.js';
+import { ECOMMERCE_ROOT as REPO_ROOT } from '../utils/repoRoot.js';
 
 /** Sentinel used in the testResult when Jest could not execute at all.
  *  Distinguishable from a real run because totalTests === -1. */
 export const JEST_EXEC_FAILURE_SENTINEL = -1;
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo');
 
 /**
  * Injectable I/O layer — lets tests swap out existsSync / execSync without

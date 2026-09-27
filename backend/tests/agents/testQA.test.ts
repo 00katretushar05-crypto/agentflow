@@ -11,10 +11,9 @@ import * as path from 'path';
 import * as fs from 'fs';
 import { runTestQA, _io, JEST_EXEC_FAILURE_SENTINEL } from '../../src/agents/testQA.js';
 import type { AgentTask } from '../../src/types/contracts';
+import { ECOMMERCE_ROOT } from '../../src/utils/repoRoot.js';
 
-const CHECKOUT_JS = path.resolve(
-  __dirname, '..', '..', '..', 'ecommerce-demo', 'src', 'checkout', 'checkout.js',
-);
+const CHECKOUT_JS = path.join(ECOMMERCE_ROOT, 'src', 'checkout', 'checkout.js');
 
 const BUGGY_CHECKOUT = `/**
  * checkout.js

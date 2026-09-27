@@ -11,14 +11,8 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { fileURLToPath } from 'node:url';
 import type { AgentTask, AgentResult, Finding } from '../types/contracts.js';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-/** Absolute path to the ecommerce-demo repo (relative to this file at runtime). */
-const REPO_ROOT = path.resolve(__dirname, '..', '..', '..', 'ecommerce-demo');
+import { ECOMMERCE_ROOT as REPO_ROOT } from '../utils/repoRoot.js';
 
 // ---------------------------------------------------------------------------
 // Internal helpers
