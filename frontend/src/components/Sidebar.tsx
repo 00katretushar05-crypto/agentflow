@@ -1,4 +1,5 @@
-import { NavLink, useLocation } from "react-router-dom";
+import { useEffect, useState } from "react";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import {
   Terminal,
   Activity,
@@ -9,17 +10,48 @@ import {
   Circle,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
-
-const NAV_ITEMS = [
-  { to: "/", label: "Command Center", icon: Terminal, exact: true },
-  { to: "/mission/task-001", label: "Mission Control", icon: Activity },
-  { to: "/agents", label: "Agent Network", icon: Network },
-  { to: "/evidence/task-001", label: "Evidence Ledger", icon: ClipboardCheck },
-  { to: "/history", label: "Task History", icon: History },
-];
+import { getTasks } from "@/lib/api";
 
 export function Sidebar() {
   const location = useLocation();
+  const navigate = useNavigate();
+
+  const [latestTaskId, setLatestTaskId] = useState<string | null>(null);
+
+  // Fetch tasks once on mount so we can derive the latest task ID.
+  // Silently ignores errors — the sidebar just shows items as disabled.
+  useEffect(() => {
+    getTasks()
+      .then((res) => {
+        const latest = res.tasks[0] ?? null;
+        setLatestTaskId(latest?.taskId ?? null);
+      })
+      .catch(() => {
+        // Backend unavailable or empty — leave latestTaskId null (items stay disabled)
+      });
+  }, []);
+
+  type NavItem =
+    | { type: "link"; to: string; label: string; icon: React.ElementType; exact?: boolean }
+    | { type: "dynamic"; key: string; label: string; icon: React.ElementType; basePath: string };
+
+  const NAV_ITEMS: NavItem[] = [
+    { type: "link", to: "/", label: "Command Center", icon: Terminal, exact: true },
+    { type: "dynamic", key: "mission", label: "Mission Control", icon: Activity, basePath: "mission" },
+    { type: "link", to: "/agents", label: "Agent Network", icon: Network },
+    { type: "dynamic", key: "evidence", label: "Evidence Ledger", icon: ClipboardCheck, basePath: "evidence" },
+    { type: "link", to: "/history", label: "Task History", icon: History },
+  ];
+
+  function isActivePath(to: string, exact?: boolean) {
+    return exact
+      ? location.pathname === to
+      : location.pathname.startsWith(`/${to.split("/")[1] || ""}`);
+  }
+
+  function isDynamicActive(basePath: string) {
+    return location.pathname.startsWith(`/${basePath}`);
+  }
 
   return (
     <aside className="fixed left-0 top-0 h-full w-56 flex flex-col border-r border-white/[0.06] bg-[#0d0f14] z-40">
@@ -47,17 +79,57 @@ export function Sidebar() {
         <p className="px-3 mb-3 text-[9px] tracking-[0.15em] text-white/25 uppercase font-semibold">
           Navigation
         </p>
-        {NAV_ITEMS.map(({ to, label, icon: Icon, exact }) => {
-          const isActive = exact
-            ? location.pathname === to
-            : location.pathname.startsWith(to.split("/")[1] ? `/${to.split("/")[1]}` : to);
+        {NAV_ITEMS.map((item) => {
+          if (item.type === "link") {
+            const isActive = isActivePath(item.to, item.exact);
+            return (
+              <NavLink
+                key={item.to}
+                to={item.to}
+                className={cn(
+                  "flex items-center gap-3 px-3 py-2 rounded-md text-[13px] font-medium transition-all duration-150 group relative",
+                  isActive
+                    ? "bg-indigo-500/10 text-indigo-300"
+                    : "text-white/40 hover:text-white/70 hover:bg-white/[0.04]"
+                )}
+              >
+                {isActive && (
+                  <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-indigo-500 rounded-full" />
+                )}
+                <item.icon
+                  className={cn(
+                    "w-4 h-4 shrink-0 transition-colors",
+                    isActive ? "text-indigo-400" : "text-white/30 group-hover:text-white/50"
+                  )}
+                />
+                {item.label}
+              </NavLink>
+            );
+          }
 
+          // Dynamic item — enabled only when a task exists
+          if (!latestTaskId) {
+            return (
+              <div
+                key={item.key}
+                title="No active task"
+                className="flex items-center gap-3 px-3 py-2 rounded-md text-[13px] font-medium text-white/20 cursor-not-allowed select-none"
+              >
+                <item.icon className="w-4 h-4 shrink-0 text-white/15" />
+                <span>{item.label}</span>
+                <span className="ml-auto text-[9px] text-white/20 uppercase tracking-wide">No task</span>
+              </div>
+            );
+          }
+
+          const to = `/${item.basePath}/${latestTaskId}`;
+          const isActive = isDynamicActive(item.basePath);
           return (
-            <NavLink
-              key={to}
-              to={to}
+            <button
+              key={item.key}
+              onClick={() => navigate(to)}
               className={cn(
-                "flex items-center gap-3 px-3 py-2 rounded-md text-[13px] font-medium transition-all duration-150 group relative",
+                "w-full flex items-center gap-3 px-3 py-2 rounded-md text-[13px] font-medium transition-all duration-150 group relative text-left",
                 isActive
                   ? "bg-indigo-500/10 text-indigo-300"
                   : "text-white/40 hover:text-white/70 hover:bg-white/[0.04]"
@@ -66,14 +138,14 @@ export function Sidebar() {
               {isActive && (
                 <span className="absolute left-0 top-1/2 -translate-y-1/2 w-0.5 h-5 bg-indigo-500 rounded-full" />
               )}
-              <Icon
+              <item.icon
                 className={cn(
                   "w-4 h-4 shrink-0 transition-colors",
                   isActive ? "text-indigo-400" : "text-white/30 group-hover:text-white/50"
                 )}
               />
-              {label}
-            </NavLink>
+              {item.label}
+            </button>
           );
         })}
       </nav>

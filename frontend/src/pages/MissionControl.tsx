@@ -11,6 +11,7 @@ import {
   AlertCircle,
   XCircle,
   Loader2,
+  Terminal,
 } from "lucide-react";
 import { WorkflowTimeline } from "@/components/WorkflowTimeline";
 import { AgentCard } from "@/components/AgentCard";
@@ -121,14 +122,37 @@ export function MissionControl() {
 
   // ── Error / unreachable banner (task not loaded at all) ────────────────────
   if (!task) {
+    // Backend is reachable but task doesn't exist — friendly empty state
+    if (!unreachable) {
+      return (
+        <div className="max-w-7xl mx-auto px-6 py-8 flex flex-col items-center justify-center gap-6 h-72">
+          <div className="flex flex-col items-center gap-3 text-center">
+            <div className="w-12 h-12 rounded-xl bg-white/[0.04] border border-white/[0.07] flex items-center justify-center">
+              <Terminal className="w-6 h-6 text-white/20" />
+            </div>
+            <p className="text-[15px] font-semibold text-white/60">No task selected yet</p>
+            <p className="text-[12px] text-white/30 max-w-xs leading-relaxed">
+              Dispatch a task from the Command Center to begin orchestration.
+            </p>
+          </div>
+          <button
+            onClick={() => navigate("/")}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-indigo-500/10 border border-indigo-500/20 text-indigo-300 text-[13px] font-medium hover:bg-indigo-500/20 transition-colors"
+          >
+            <Terminal className="w-4 h-4" />
+            Go to Command Center
+          </button>
+        </div>
+      );
+    }
+
+    // Backend unreachable — show the technical error so the dev can debug
     return (
       <div className="max-w-7xl mx-auto px-6 py-8">
         <div className="flex items-start gap-3 px-5 py-4 rounded-xl border border-red-500/25 bg-red-500/[0.07] text-red-300">
           <AlertCircle className="w-5 h-5 shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="text-[13px] font-semibold">
-              {unreachable ? "Backend not reachable" : "Failed to load task"}
-            </p>
+            <p className="text-[13px] font-semibold">Backend not reachable</p>
             <p className="text-[12px] text-red-300/70">{error}</p>
           </div>
         </div>
