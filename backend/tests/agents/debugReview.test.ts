@@ -19,18 +19,13 @@ import { execSync } from 'child_process';
 import { runDebugReview } from '../../src/agents/debugReview.js';
 import { describe, test, expect, beforeEach, afterEach, afterAll } from 'vitest';
 import type { AgentTask, FailureReport } from '../../src/types/contracts';
+import { ECOMMERCE_ROOT } from '../../src/utils/repoRoot.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-const CHECKOUT_JS = path.resolve(
-  __dirname, '..', '..', '..', 'ecommerce-demo', 'src', 'checkout', 'checkout.js',
-);
-
-const ECOMMERCE_ROOT = path.resolve(
-  __dirname, '..', '..', '..', 'ecommerce-demo',
-);
+const CHECKOUT_JS = path.join(ECOMMERCE_ROOT, 'src', 'checkout', 'checkout.js');
 
 /** Original (buggy) content — hardcoded to guarantee it is always the buggy version
  *  regardless of the checkout.js state on disk at module-load time.
