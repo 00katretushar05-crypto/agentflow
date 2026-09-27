@@ -121,11 +121,17 @@ describe("Full task lifecycle", () => {
       const evidenceRes = await request.get(`/api/task/${taskId}/evidence`);
       expect(evidenceRes.status).toBe(200);
 
-      const evidencePayload = unwrap(evidenceRes.body);
+      const evidencePayload = unwrap(evidenceRes.body) as {
+        items?: Record<string, unknown>[];
+        ledger?: Record<string, unknown>;
+      };
 
-      const entries: Record<string, unknown>[] = Array.isArray(evidencePayload)
-        ? (evidencePayload as unknown as Record<string, unknown>[])
-        : (Object.values(evidencePayload) as Record<string, unknown>[]);
+      // The evidence endpoint returns a named object: { taskId, items, updatedAt, ledger }.
+      const entries: Record<string, unknown>[] = Array.isArray(evidencePayload.items)
+        ? evidencePayload.items
+        : [];
+
+      const summary = evidencePayload.ledger ?? {};
 
       if (terminalStatus !== "VERIFIED") {
         console.error(
@@ -137,24 +143,32 @@ describe("Full task lifecycle", () => {
       expect(terminalStatus).toBe("VERIFIED");
       expect(entries.length).toBeGreaterThan(0);
 
+      // Test-pass evidence lives inside the TEST_QA AGENT_RESULT entry's testResult payload,
+      // not as a standalone "test_execution" entry type.
       const passingTestEntry = entries.find((entry) => {
-        const isTestExecution =
-          entry.type === "test_execution" || entry.type === "TEST_EXECUTION";
+        const payload = entry.payload as Record<string, unknown> | undefined;
+        const isTestQaResult =
+          entry.type === "AGENT_RESULT" && payload?.agent === "TEST_QA";
+        const testResult = payload?.testResult as
+          | { passed?: number; failed?: number }
+          | undefined;
         const isPassing =
-          entry.passed === true ||
-          entry.status === "PASSED" ||
-          entry.status === "passed";
-        return isTestExecution && isPassing;
+          !!testResult && (testResult.passed ?? 0) > 0 && (testResult.failed ?? 0) === 0;
+        return isTestQaResult && isPassing;
       });
 
       if (passingTestEntry === undefined) {
         console.error(
-          "[EVIDENCE LEDGER — no passing test_execution entry found]",
+          "[EVIDENCE LEDGER — no passing TEST_QA result found]",
           JSON.stringify(entries, null, 2)
         );
       }
 
       expect(passingTestEntry).toBeDefined();
+
+      // Sanity-check the summary object too, since it directly reports pass/fail counts.
+      expect(summary.testsPassed).toBeGreaterThan(0);
+      expect(summary.regressionPassed).toBe(true);
     } catch (err: unknown) {
       if (isConnectionRefused(err)) {
         throw new Error(
