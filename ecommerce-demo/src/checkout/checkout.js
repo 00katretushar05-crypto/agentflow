@@ -31,7 +31,7 @@ function checkout(userId, items) {
   // [BUG] Should be { membership: customer.type } so discountService can
   //       detect premium status.  Using `type` means membership is undefined
   //       inside getDiscount(), so the 10 % branch is never reached.
-  const discountRate = getDiscount({ membership: customer.type }); // ← INTENTIONAL BUG
+  const discountRate = getDiscount({ type: customer.type }); // ← INTENTIONAL BUG
 
   const discount = subtotal * discountRate;
   const total = subtotal - discount;
