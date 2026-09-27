@@ -11,26 +11,10 @@ import type { SupervisorTaskState, RiskAssessment } from './types/contracts.js';
 /**
  * Compute a RiskAssessment from already-collected agent results.
  *
- * Formula (deterministic, no randomness):
+ * Formula (deterministic, transparent, rule-based — no ML, no randomness):
  *
- *   structuralScore = filesAffected * 10
- *                   + functionsAffected * 5
- *                   + impactScore          (HIGH=30, MEDIUM=15, LOW=0)
- *
- *   testMultiplier  = when tests have run:
- *                       failRate = failed / totalTests
- *                       multiplier = 0.25 + 0.75 * failRate
- *                       (0 failures → 0.25x  ·  all failures → 1.0x)
- *                   = 1.0 when no test result is present
- *
- *   failurePenalty  = min(40, failed * 8)   — directly penalises failing tests
- *
- *   riskPercent = min(100, structuralScore * testMultiplier + failurePenalty)
- *
- * A fully-passing run (failed=0) reduces the structural score to 25 % of its
- * raw value and adds zero penalty, so static factors like file/function counts
- * and dependency impact still inform the score without dominating it when tests
- * actually confirm the change is safe.
+ *   riskPercent = min(100, filesAffected * 10 + functionsAffected * 5 + impactScore)
+ *   impactScore = HIGH → 30, MEDIUM → 15, LOW → 0
  *
  * Thresholds:
  *   < 30  → low risk, safe to proceed
@@ -52,24 +36,9 @@ export function computeRiskAssessment(state: SupervisorTaskState): RiskAssessmen
     dependencyImpact === 'HIGH'   ? 30 :
     dependencyImpact === 'MEDIUM' ? 15 : 0;
 
-  const structuralScore = filesAffected * 10 + functionsAffected * 5 + impactScore;
-
-  // When a test result is available, scale the structural score by how many
-  // tests failed.  A fully-passing run caps the multiplier at 0.25, meaning
-  // structural factors can only contribute 25 % of their raw weight.
-  // Without any test result we conservatively leave the multiplier at 1.0.
-  let testMultiplier = 1.0;
-  let failurePenalty = 0;
-  if (testResult && testResult.totalTests > 0) {
-    const failRate = testResult.failed / testResult.totalTests;
-    testMultiplier = 0.25 + 0.75 * failRate;
-    // Each failing test adds a direct penalty (capped so 5 failures = 40 pts).
-    failurePenalty = Math.min(40, testResult.failed * 8);
-  }
-
   const riskPercent = Math.min(
     100,
-    Math.round(structuralScore * testMultiplier + failurePenalty),
+    filesAffected * 10 + functionsAffected * 5 + impactScore,
   );
 
   const recommendation =

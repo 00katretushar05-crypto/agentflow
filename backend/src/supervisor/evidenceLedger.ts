@@ -21,7 +21,7 @@
  *   testResult.failed > 0 it synthesises a FailureReport ready for the
  *   DEBUG_REVIEW agent. Returns null when no failures are present.
  */
-
+import { JEST_EXEC_FAILURE_SENTINEL } from '../agents/testQA.js';
 import type {
   SupervisorTaskState,
   VerificationResult,
@@ -83,12 +83,23 @@ export function buildLedgerSummary(state: SupervisorTaskState): EvidenceLedgerSu
   // 3. filesChangedCount — union of filesModified from every agent result
   const filesChangedCount = countFilesChanged(state);
 
-  // 4 & 5. testsExecuted / testsPassed — from most-recent TEST_QA result
-  const testsExecuted = qaResult?.testResult?.totalTests ?? 0;
-  const testsPassed   = qaResult?.testResult?.passed     ?? 0;
+  // Detect Jest execution failure — the sentinel means no tests actually ran,
+  // regardless of what totalTests/failed happen to read as raw numbers.
+  const jestExecutionFailed =
+    qaResult?.testResult?.totalTests === JEST_EXEC_FAILURE_SENTINEL;
 
-  // 6. regressionPassed — no failures in most-recent TEST_QA
-  const regressionPassed = (qaResult?.testResult?.failed ?? 0) === 0;
+  // 4 & 5. testsExecuted / testsPassed — from most-recent TEST_QA result.
+  // Never propagate the -1 sentinel as a real count — treat an execution
+  // failure as zero tests executed, zero passed.
+  const testsExecuted = jestExecutionFailed ? 0 : (qaResult?.testResult?.totalTests ?? 0);
+  const testsPassed   = jestExecutionFailed ? 0 : (qaResult?.testResult?.passed     ?? 0);
+
+  // 6. regressionPassed — no failures in most-recent TEST_QA.
+  // An execution failure is NOT a passing regression check — tests never ran,
+  // so we cannot claim "no regressions". Treat it as failed/unresolved.
+  const regressionPassed = jestExecutionFailed
+    ? false
+    : (qaResult?.testResult?.failed ?? 0) === 0;
 
   // 7. codeReviewStatus — 'DONE' once CODE_INTELLIGENCE has a result
   const codeReviewStatus: EvidenceLedgerSummary['codeReviewStatus'] =
